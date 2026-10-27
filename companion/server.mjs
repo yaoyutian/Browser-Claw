@@ -13,12 +13,78 @@
 // 隐私：只监听 127.0.0.1；不写任何日志文件；所有数据在内存中。
 
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join as pathJoin } from 'node:path';
 import process from 'node:process';
 
 const PORT = Number(process.env.NBC_PORT || 8787);
 const HOST = '127.0.0.1';
 const START_MCP = process.argv.includes('--mcp');
+
+// ---------------------------------------------------------------------------
+// 本地工具配置（ffmpeg / yt-dlp / 下载目录）
+//
+// 扩展无法启动本地进程，所以"在浏览器里配置路径"的落地方式是：
+// 扩展把配置推到 companion，由 companion 实际调用这些程序。
+// 配置持久化在用户主目录，不写进仓库。
+// ---------------------------------------------------------------------------
+
+const CONFIG_DIR = pathJoin(homedir(), '.netbrowserclaw');
+const CONFIG_FILE = pathJoin(CONFIG_DIR, 'config.json');
+
+const defaultDownloadsDir = pathJoin(homedir(), 'Downloads');
+
+let toolConfig = {
+  ffmpegPath: '',
+  ytdlpPath: '',
+  downloadDir: defaultDownloadsDir,
+};
+
+function loadConfig() {
+  try {
+    if (!existsSync(CONFIG_FILE)) return;
+    const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
+    toolConfig = { ...toolConfig, ...raw };
+  } catch {
+    // 配置损坏时用默认值，不影响服务启动。
+  }
+}
+
+function saveConfig() {
+  try {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+    writeFileSync(CONFIG_FILE, JSON.stringify(toolConfig, null, 2), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+loadConfig();
+
+/**
+ * 探测一个可执行文件是否可用。
+ * 只做只读检查（-version），不执行任何用户输入的任意参数。
+ */
+function probeBinary(binPath, versionFlag = '-version') {
+  if (!binPath) return { ok: false, reason: '未配置路径' };
+  if (!existsSync(binPath)) return { ok: false, reason: '文件不存在' };
+  try {
+    const res = spawnSync(binPath, [versionFlag], {
+      encoding: 'utf8',
+      timeout: 8000,
+      windowsHide: true,
+    });
+    if (res.error) return { ok: false, reason: res.error.message };
+    const out = `${res.stdout || ''}${res.stderr || ''}`.trim().split('\n')[0] || '';
+    return { ok: res.status === 0, version: out, path: binPath };
+  } catch (e) {
+    return { ok: false, reason: e?.message || String(e) };
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // 桥：扩展轮询取命令，我们回传结果
@@ -101,6 +167,25 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
+/** 取 URL 的文件名部分。 */
+function urlBasename(u) {
+  try {
+    const p = new URL(u).pathname;
+    return decodeURIComponent(p.split('/').pop() || 'download');
+  } catch {
+    return 'download';
+  }
+}
+
+/** 取文件大小（字节）。 */
+function statSize(p) {
+  try {
+    return statSync(p).size;
+  } catch {
+    return null;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
 
@@ -124,6 +209,11 @@ const server = http.createServer(async (req, res) => {
         version: '0.1.0',
         extensionConnected: Date.now() - lastExtensionSeen < 10_000,
         pendingCommands: pending.length,
+        tools: {
+          ffmpeg: toolConfig.ffmpegPath ? probeBinary(toolConfig.ffmpegPath).ok : false,
+          ytdlp: toolConfig.ytdlpPath ? probeBinary(toolConfig.ytdlpPath, '--version').ok : false,
+        },
+        downloadDir: toolConfig.downloadDir,
       });
       return;
     }
@@ -209,6 +299,182 @@ const server = http.createServer(async (req, res) => {
         const idx = waiters.indexOf(handler);
         if (idx >= 0) waiters.splice(idx, 1);
       });
+      return;
+    }
+
+    // --- 本地工具配置 -----------------------------------------------------
+    if (url.pathname === '/config' && req.method === 'GET') {
+      sendJson(res, 200, {
+        ok: true,
+        config: {
+          ...toolConfig,
+          ffmpegDetected: probeBinary(toolConfig.ffmpegPath),
+          ytdlpDetected: probeBinary(toolConfig.ytdlpPath, '--version'),
+          downloadDirExists: existsSync(toolConfig.downloadDir),
+        },
+      });
+      return;
+    }
+
+    if (url.pathname === '/config' && req.method === 'POST') {
+      const body = await readJson(req);
+      const next = { ...toolConfig };
+      if (typeof body.ffmpegPath === 'string') next.ffmpegPath = body.ffmpegPath.trim();
+      if (typeof body.ytdlpPath === 'string') next.ytdlpPath = body.ytdlpPath.trim();
+      if (typeof body.downloadDir === 'string' && body.downloadDir.trim()) {
+        next.downloadDir = body.downloadDir.trim();
+      }
+      toolConfig = next;
+      const persisted = saveConfig();
+      sendJson(res, 200, {
+        ok: true,
+        persisted,
+        config: {
+          ...toolConfig,
+          ffmpegDetected: probeBinary(toolConfig.ffmpegPath),
+          ytdlpDetected: probeBinary(toolConfig.ytdlpPath, '--version'),
+          downloadDirExists: existsSync(toolConfig.downloadDir),
+        },
+      });
+      return;
+    }
+
+    // --- 检测本地工具 -----------------------------------------------------
+    if (url.pathname === '/tools/detect' && req.method === 'POST') {
+      const body = await readJson(req);
+      const result = {
+        ffmpeg: probeBinary(body.ffmpegPath),
+        ytdlp: probeBinary(body.ytdlpPath, '--version'),
+      };
+      if (body.downloadDir) {
+        result.downloadDir = {
+          ok: existsSync(body.downloadDir),
+          path: body.downloadDir,
+          reason: existsSync(body.downloadDir) ? '' : '目录不存在',
+        };
+      }
+      sendJson(res, 200, result);
+      return;
+    }
+
+    // --- 流媒体下载（ffmpeg 合并 HLS/DASH） --------------------------------
+    if (url.pathname === '/hls' && req.method === 'POST') {
+      const { targetUrl, filename, referer, cookie } = await readJson(req);
+      if (!targetUrl) {
+        sendJson(res, 400, { error: '缺少 targetUrl' });
+        return;
+      }
+      if (!toolConfig.ffmpegPath) {
+        sendJson(res, 400, { error: '未配置 ffmpeg 路径' });
+        return;
+      }
+      const ffmpeg = probeBinary(toolConfig.ffmpegPath);
+      if (!ffmpeg.ok) {
+        sendJson(res, 400, { error: `ffmpeg 不可用: ${ffmpeg.reason}` });
+        return;
+      }
+
+      const outName = (filename || 'video').replace(/[\\/:*?"<>|]/g, '_').replace(/\.[a-z0-9]+$/i, '');
+      const outPath = pathJoin(toolConfig.downloadDir, `${outName}.mp4`);
+      mkdirSync(toolConfig.downloadDir, { recursive: true });
+
+      // 组装请求头：ffmpeg 用 -headers 传，格式为 "Key: Value\r\n"
+      const headerLines = [];
+      if (referer) headerLines.push(`Referer: ${referer}`);
+      if (cookie) headerLines.push(`Cookie: ${cookie}`);
+      if (headerLines.length) headerLines.push('User-Agent: Mozilla/5.0');
+
+      const args = [];
+      if (headerLines.length) args.push('-headers', `${headerLines.join('\r\n')}\r\n`);
+      args.push('-i', targetUrl, '-c', 'copy', '-movflags', '+faststart', '-y', outPath);
+
+      const proc = spawn(toolConfig.ffmpegPath, args, { windowsHide: true });
+      let stderr = '';
+      proc.stderr.on('data', (d) => {
+        stderr += d.toString();
+        if (stderr.length > 20000) stderr = stderr.slice(-20000);
+      });
+
+      const code = await new Promise((resolve) => {
+        proc.on('error', (e) => resolve({ error: e.message }));
+        proc.on('close', (c) => resolve({ code: c }));
+      });
+
+      if (code.error) {
+        sendJson(res, 500, { error: `ffmpeg 启动失败: ${code.error}` });
+        return;
+      }
+      if (code.code !== 0) {
+        const tail = stderr.split('\n').filter(Boolean).slice(-6).join('\n');
+        sendJson(res, 500, { error: `ffmpeg 退出码 ${code.code}`, detail: tail });
+        return;
+      }
+      const size = existsSync(outPath) ? statSize(outPath) : null;
+      sendJson(res, 200, { ok: true, path: outPath, size, mode: 'ffmpeg' });
+      return;
+    }
+
+    // --- 通用下载（优先用 yt-dlp，回退到原生 fetch） -------------------------
+    if (url.pathname === '/download' && req.method === 'POST') {
+      const { targetUrl, filename, referer, cookie } = await readJson(req);
+      if (!targetUrl) {
+        sendJson(res, 400, { error: '缺少 targetUrl' });
+        return;
+      }
+      mkdirSync(toolConfig.downloadDir, { recursive: true });
+
+      // 有 yt-dlp 就用它（能处理更多站点）
+      if (toolConfig.ytdlpPath && probeBinary(toolConfig.ytdlpPath, '--version').ok) {
+        const outName = (filename || 'download').replace(/[\\/:*?"<>|]/g, '_');
+        const outTemplate = pathJoin(toolConfig.downloadDir, `${outName}.%(ext)s`);
+        const args = ['--no-playlist', '-o', outTemplate];
+        if (referer) args.push('--referer', referer);
+        if (cookie) args.push('--add-header', `Cookie:${cookie}`);
+        args.push(targetUrl);
+
+        const proc = spawn(toolConfig.ytdlpPath, args, { windowsHide: true });
+        let stderr = '';
+        proc.stderr.on('data', (d) => {
+          stderr += d.toString();
+          if (stderr.length > 20000) stderr = stderr.slice(-20000);
+        });
+        const code = await new Promise((resolve) => {
+          proc.on('error', (e) => resolve({ error: e.message }));
+          proc.on('close', (c) => resolve({ code: c }));
+        });
+        if (code.error) {
+          sendJson(res, 500, { error: `yt-dlp 启动失败: ${code.error}` });
+          return;
+        }
+        if (code.code !== 0) {
+          sendJson(res, 500, {
+            error: `yt-dlp 退出码 ${code.code}`,
+            detail: stderr.split('\n').filter(Boolean).slice(-6).join('\n'),
+          });
+          return;
+        }
+        sendJson(res, 200, { ok: true, dir: toolConfig.downloadDir, mode: 'yt-dlp' });
+        return;
+      }
+
+      // 回退：原生 fetch
+      try {
+        const headers = {};
+        if (referer) headers.Referer = referer;
+        if (cookie) headers.Cookie = cookie;
+        const upstream = await fetch(targetUrl, { headers, credentials: 'include' });
+        if (!upstream.ok) {
+          sendJson(res, 502, { error: `上游返回 ${upstream.status}` });
+          return;
+        }
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        const safe = (filename || urlBasename(targetUrl)).replace(/[\\/:*?"<>|]/g, '_');
+        const outPath = pathJoin(toolConfig.downloadDir, safe);
+        writeFileSync(outPath, buf);
+        sendJson(res, 200, { ok: true, path: outPath, size: buf.length, mode: 'fetch' });
+      } catch (e) {
+        sendJson(res, 500, { error: e?.message || String(e) });
+      }
       return;
     }
 
@@ -348,6 +614,33 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: 'browser_table_downloads',
+    description:
+      '采集表格单元格里的文档下载链接（PDF/Word/Excel），自动翻页累积全部页面，' +
+      '并带出行标签与列标题。当页面是清单/报表类表格、每行每列都藏着文档链接时使用。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        exts: { type: 'string', description: '扩展名列表，默认 "pdf,doc,docx,xls,xlsx,ppt,pptx,csv,zip"' },
+        maxPages: { type: 'integer', description: '最多翻页数，默认 10' },
+      },
+    },
+  },
+  {
+    name: 'browser_download_table',
+    description:
+      '批量下载表格里的所有文档（自动翻页收集），文件名按「行标签_列标题」命名。' +
+      '这是「把这个清单页上的 PDF 全下载下来」的正确工具。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        exts: { type: 'string' },
+        maxPages: { type: 'integer' },
+        tabId: { type: 'integer' },
+      },
+    },
+  },
+  {
     name: 'browser_list_tabs',
     description: '列出所有打开的网页标签页。',
     inputSchema: { type: 'object', properties: {} },
@@ -377,6 +670,8 @@ const MCP_TO_DISPATCH = {
     a.preset ? ['style.preset', { preset: a.preset }] : ['style.apply', { css: a.css, scope: a.scope }],
   browser_click: (a) => ['page.click', { selector: a.selector, index: a.index }],
   browser_fill: (a) => ['page.fill', { selector: a.selector, index: a.index, value: a.value, submit: a.submit }],
+  browser_table_downloads: (a) => ['table.docs', { exts: a.exts, maxPages: a.maxPages, tabId: a.tabId }],
+  browser_download_table: (a) => ['table.download', { exts: a.exts, maxPages: a.maxPages, tabId: a.tabId }],
   browser_list_tabs: () => ['tab.list', {}],
   browser_open_tab: (a) => ['tab.open', { url: a.url }],
 };

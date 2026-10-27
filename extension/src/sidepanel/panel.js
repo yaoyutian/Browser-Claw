@@ -4,6 +4,12 @@ import { PROVIDER_PRESETS, PRESET_MAP, resolveProvider, listModels } from '../sh
 import { runAgent, systemPrompt } from '../shared/agent.js';
 import { Text } from '../shared/providers.js';
 import { TOOLS } from '../shared/tools.js';
+import {
+  detectTools,
+  fetchToolConfig,
+  pushToolConfig,
+  configuredUrl,
+} from '../shared/companion.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -29,6 +35,11 @@ const state = {
   provider: null,
   busy: false,
   controller: null,
+  tools: {
+    ffmpegPath: '',
+    ytdlpPath: '',
+    downloadDir: '',
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -36,9 +47,10 @@ const state = {
 // ---------------------------------------------------------------------------
 
 const STORAGE_KEY = 'nbc:settings';
+const TOOLS_KEY = 'nbc:tools';
 
 async function loadSettings() {
-  const stored = await chrome.storage.local.get(STORAGE_KEY);
+  const stored = await chrome.storage.local.get([STORAGE_KEY, TOOLS_KEY]);
   const s = stored[STORAGE_KEY] || {};
   const providerId = s.providerId || 'deepseek';
   const preset = PRESET_MAP[providerId] || PROVIDER_PRESETS[0];
@@ -51,14 +63,25 @@ async function loadSettings() {
     model: s.model || preset.defaultModel,
     transport: s.transport || 'direct',
     relayUrl: s.relayUrl || 'http://127.0.0.1:8787',
+    companionUrl: s.companionUrl || '',
     temperature: s.temperature ?? 0.7,
     maxTokens: s.maxTokens || 8192,
+  };
+
+  const t = stored[TOOLS_KEY] || {};
+  state.tools = {
+    ffmpegPath: t.ffmpegPath || '',
+    ytdlpPath: t.ytdlpPath || '',
+    downloadDir: t.downloadDir || '',
   };
   return state.provider;
 }
 
 async function saveSettings() {
-  await chrome.storage.local.set({ [STORAGE_KEY]: state.provider });
+  await chrome.storage.local.set({
+    [STORAGE_KEY]: state.provider,
+    [TOOLS_KEY]: state.tools,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +127,11 @@ function syncSettingsForm() {
   $('temp-value').textContent = String(p.temperature ?? 0.7);
   $('inp-maxtokens').value = p.maxTokens || 8192;
 
+  const t = state.tools;
+  $('inp-ffmpeg').value = t.ffmpegPath || '';
+  $('inp-ytdlp').value = t.ytdlpPath || '';
+  $('inp-dl-dir').value = t.downloadDir || '';
+
   const preset = PRESET_MAP[p.providerId];
   $('provider-hint').textContent = preset?.keyUrl
     ? `API Key 获取地址：${preset.keyUrl}`
@@ -132,6 +160,7 @@ function updateProviderBar() {
 function openSettings() {
   syncSettingsForm();
   el.settings.hidden = false;
+  refreshToolStatus();
 }
 
 function closeSettings() {
@@ -519,11 +548,116 @@ $('btn-save-settings').addEventListener('click', async () => {
   state.provider.relayUrl = $('inp-relay').value.trim().replace(/\/+$/, '');
   state.provider.temperature = Number($('inp-temp').value);
   state.provider.maxTokens = Number($('inp-maxtokens').value) || 8192;
+
+  state.tools.ffmpegPath = $('inp-ffmpeg').value.trim();
+  state.tools.ytdlpPath = $('inp-ytdlp').value.trim();
+  state.tools.downloadDir = $('inp-dl-dir').value.trim();
+
   await saveSettings();
   updateProviderBar();
-  $('save-status').textContent = '已保存 ✓';
-  setTimeout(() => ($('save-status').textContent = ''), 1800);
+
+  // 把本地工具路径推送给 companion（扩展不能直接调本地程序）。
+  const pushed = await pushToolConfig(state.tools);
+  $('save-status').textContent = pushed.ok ? '已保存 ✓' : '已保存（companion 未运行）';
+  setTimeout(() => ($('save-status').textContent = ''), 2200);
 });
+
+/** 读取当前输入框里的本地工具配置。 */
+function currentToolsConfig() {
+  return {
+    ffmpegPath: $('inp-ffmpeg').value.trim(),
+    ytdlpPath: $('inp-ytdlp').value.trim(),
+    downloadDir: $('inp-dl-dir').value.trim(),
+  };
+}
+
+function setStatus(id, text, ok) {
+  const el = $(id);
+  el.textContent = text;
+  el.style.color = ok === true ? 'var(--ok)' : ok === false ? 'var(--err)' : '';
+}
+
+/** 检测本地程序路径（需要 companion 参与）。 */
+async function detect(kind) {
+  const cfg = currentToolsConfig();
+  const statusId =
+    kind === 'ffmpeg' ? 'ffmpeg-status' : kind === 'ytdlp' ? 'ytdlp-status' : 'dl-dir-status';
+  setStatus(statusId, '检测中…');
+
+  const res = await detectTools(cfg);
+  if (!res.ok) {
+    setStatus(statusId, `${res.error}。${res.hint || ''} 请先运行 node companion/server.mjs`, false);
+    return;
+  }
+
+  const d = res.data || {};
+  if (kind === 'ffmpeg') {
+    const f = d.ffmpeg;
+    setStatus(
+      'ffmpeg-status',
+      f.ok ? `✓ 可用：${f.version || '已检测到'}` : `✗ 不可用：${f.reason}`,
+      f.ok
+    );
+  } else if (kind === 'ytdlp') {
+    const y = d.ytdlp;
+    setStatus(
+      'ytdlp-status',
+      y.ok ? `✓ 可用：${y.version || '已检测到'}` : `✗ 不可用：${y.reason}`,
+      y.ok
+    );
+  } else {
+    const dd = d.downloadDir;
+    setStatus(
+      'dl-dir-status',
+      dd?.ok ? `✓ 目录可用：${dd.path}` : `✗ 不可用：${dd?.reason || '未知'}`,
+      dd?.ok
+    );
+  }
+}
+
+$('btn-detect-ffmpeg').addEventListener('click', () => detect('ffmpeg'));
+$('btn-detect-ytdlp').addEventListener('click', () => detect('ytdlp'));
+$('btn-detect-dir').addEventListener('click', () => detect('dir'));
+
+/** 打开设置时，从 companion 拉一次已保存的配置。 */
+async function refreshToolStatus() {
+  const res = await fetchToolConfig();
+  if (!res.ok) {
+    setStatus('ffmpeg-status', 'companion 未运行 —— 本地工具功能不可用', false);
+    setStatus('ytdlp-status', 'companion 未运行', false);
+    return;
+  }
+  const c = res.data?.config || {};
+  const f = c.ffmpegDetected || {};
+  const y = c.ytdlpDetected || {};
+  setStatus(
+    'ffmpeg-status',
+    c.ffmpegPath
+      ? f.ok
+        ? `✓ 可用：${f.version || ''}`
+        : `✗ 不可用：${f.reason}`
+      : '未配置（下载 HLS/DASH 视频流时才需要）',
+    c.ffmpegPath ? f.ok : null
+  );
+  setStatus(
+    'ytdlp-status',
+    c.ytdlpPath ? (y.ok ? `✓ 可用：${y.version || ''}` : `✗ 不可用：${y.reason}`) : '未配置（可选）',
+    c.ytdlpPath ? y.ok : null
+  );
+  setStatus(
+    'dl-dir-status',
+    c.downloadDir
+      ? c.downloadDirExists
+        ? `✓ ${c.downloadDir}`
+        : `✗ 目录不存在：${c.downloadDir}`
+      : '未配置',
+    c.downloadDir ? c.downloadDirExists : null
+  );
+  // 用 companion 里的配置回填输入框（只在输入框为空时，避免覆盖用户正在编辑的内容）
+  if (!$('inp-ffmpeg').value && c.ffmpegPath) $('inp-ffmpeg').value = c.ffmpegPath;
+  if (!$('inp-ytdlp').value && c.ytdlpPath) $('inp-ytdlp').value = c.ytdlpPath;
+  if (!$('inp-dl-dir').value && c.downloadDir) $('inp-dl-dir').value = c.downloadDir;
+}
 
 $('btn-clear-storage').addEventListener('click', async () => {
   await chrome.storage.local.clear();

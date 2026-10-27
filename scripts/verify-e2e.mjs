@@ -8,7 +8,7 @@
 // 它会真实地：加载扩展 → 打开测试页 → 调工具 → 检查 DOM/文件系统结果。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +82,62 @@ writeFileSync(join(webRoot, 'demo.txt'), 'hello from nbc test server\n');
 // 伪造一个 PDF 与 mp4，用于下载链路测试
 writeFileSync(join(webRoot, 'guide.pdf'), Buffer.from('%PDF-1.4\n% netbrowserclaw test\n', 'latin1'));
 writeFileSync(join(webRoot, 'demo.mp4'), Buffer.from('\x00\x00\x00\x18ftypmp42fakevideodata', 'latin1'));
+
+// --- 分页表格测试页：3 页 × 3 行，每行 3 个 PDF 链接 ---
+mkdirSync(join(webRoot, 'docs'), { recursive: true });
+for (let i = 1; i <= 9; i++) {
+  writeFileSync(
+    join(webRoot, 'docs', `doc${i}.pdf`),
+    Buffer.from(`%PDF-1.4\n% nbc table test doc ${i}\n`, 'latin1')
+  );
+}
+writeFileSync(
+  join(webRoot, 'table.html'),
+  `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>年度报表</title>
+<style>body{font-family:sans-serif}table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #ccc;padding:6px}a{color:#06c}</style></head><body>
+<h1>2026 年度报告下载</h1>
+<table id="tbl">
+<thead><tr><th>项目名称</th><th>第一季度</th><th>第二季度</th><th>第三季度</th><th>操作</th></tr></thead>
+<tbody id="tbody"></tbody></table>
+<div class="pagination">
+  <button id="prev">上一页</button>
+  <span id="pageinfo">1 / 3</span>
+  <button id="next">下一页</button>
+</div>
+<script>
+const DATA = [
+  [['华东区','产品A','市场报告'],['华南区','产品B','财务报告'],['华北区','产品C','运营报告']],
+  [['西南区','产品D','审计报告'],['东北区','产品E','技术报告'],['西北区','产品F','合规报告']],
+  [['海外部','产品G','年度报告'],['总部','产品H','质量报告'],['研发部','产品I','专利报告']]
+];
+let page = 0;
+function render(){
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = '';
+  DATA[page].forEach(function(row, ri){
+    const tr = document.createElement('tr');
+    row.forEach(function(cell, ci){
+      const td = document.createElement('td');
+      if (ci < 2) { td.textContent = cell; }
+      else {
+        const a = document.createElement('a');
+        a.href = 'docs/doc' + (page*3 + ri + 1) + '.pdf';
+        a.textContent = '下载';
+        a.setAttribute('download', '');
+        td.appendChild(a);
+      }
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  document.getElementById('pageinfo').textContent = (page+1)+' / 3';
+}
+document.getElementById('next').onclick = function(){ if(page < DATA.length-1){ page++; render(); } };
+document.getElementById('prev').onclick = function(){ if(page > 0){ page--; render(); } };
+render();
+</script></body></html>`
+);
 
 const webServer = spawn('python', ['-m', 'http.server', String(WEB_PORT), '--directory', webRoot], {
   stdio: 'ignore',
@@ -178,9 +234,23 @@ async function waitForChromeApi(conn, tries = 40) {
   return false;
 }
 
+// 测试依赖 Edge 持续运行；若中途被关闭，后续断言会莫名失败。
+// 记录存活状态，失败时能区分「环境中断」与「功能缺陷」。
+let browserAlive = true;
+let aliveCheck = null;
+
+function startAliveCheck() {
+  aliveCheck = setInterval(() => {
+    httpJson('/json/list')
+      .then(() => { browserAlive = true; })
+      .catch(() => { browserAlive = false; });
+  }, 2000);
+}
+
 async function main() {
   await waitForDevtools();
   await sleep(2500);
+  startAliveCheck();
 
   const targets = await httpJson('/json/list');
   // 精确匹配本扩展的 worker：Edge 可能同时开着其他扩展的 service worker，
@@ -355,6 +425,75 @@ async function main() {
   const bad = await call('page.read', { tabId: 999999 });
   check('无效 tabId 返回错误而非崩溃', bad.ok === false, bad.error?.slice(0, 60));
 
+  // --- 11. 表格批量下载 --------------------------------------------------
+  console.log('\n[10] table.* —— 表格里的文档批量下载');
+  await sw.evaluate(
+    `chrome.tabs.create({url:'http://127.0.0.1:${WEB_PORT}/table.html'}).then(t=>t.id)`
+  );
+  await sleep(2000);
+  const tableList = await httpJson('/json/list');
+  const tableTarget = tableList.find((t) => t.type === 'page' && t.url.includes('table.html'));
+  const tableTabId = await sw.evaluate(
+    `chrome.tabs.query({url:'http://127.0.0.1:${WEB_PORT}/table.html'}).then(ts=>ts[ts.length-1].id)`
+  );
+  check('分页表格页已打开', Boolean(tableTarget), tableTarget?.url || '');
+
+  const tableCall = (name, args = {}) =>
+    panel
+      .evaluate(
+        `chrome.runtime.sendMessage({type:'nbc:tool',name:${JSON.stringify(name)},` +
+          `args:${JSON.stringify(args)},tabId:${tableTabId}}).then(r=>JSON.stringify(r))`
+      )
+      .then((s) => JSON.parse(s));
+
+  const docs = await tableCall('table.docs', { exts: 'pdf', maxPages: 5 });
+  check('table.docs 执行成功', docs.ok === true, docs.error || '');
+  check('采集到 9 个文档链接', docs.data?.total === 9, `实际 ${docs.data?.total}`);
+  // pages 里最后一项可能是「内容未变化」的停止标记，所以真实页数 = 采集到的不同 pageIndex 数
+  const distinctPages = new Set((docs.data?.items || []).map((i) => i.pageIndex)).size;
+  check('覆盖了 3 页数据', distinctPages === 3, `${distinctPages} 页`);
+  check('带上了行标签', (docs.data?.items?.[0]?.rowLabel || '').length > 0, docs.data?.items?.[0]?.rowLabel);
+  check('带上了列标题', (docs.data?.items?.[0]?.colHeader || '').length > 0, docs.data?.items?.[0]?.colHeader);
+  check('标记了来源页码', docs.data?.items?.[0]?.pageIndex === 1, `pageIndex=${docs.data?.items?.[0]?.pageIndex}`);
+  check(
+    '翻页后拿到了第 2 页的行',
+    docs.data?.items?.some((i) => i.rowLabel === '西南区'),
+    docs.data?.items?.map((i) => i.rowLabel).join(',')
+  );
+  check(
+    '翻页后拿到了第 3 页的行',
+    docs.data?.items?.some((i) => i.rowLabel === '海外部'),
+    ''
+  );
+
+  const tdl = await tableCall('table.download', { exts: 'pdf', maxPages: 5 });
+  check('table.download 执行成功', tdl.ok === true, tdl.error || '');
+  check(
+    '9 个文件全部下载成功',
+    tdl.data?.succeeded === 9,
+    JSON.stringify(tdl.data?.results?.filter((r) => !r.ok))
+  );
+  check(
+    '文件名含行标签',
+    (tdl.data?.results?.[0]?.filename || '').includes('华东区'),
+    tdl.data?.results?.slice(0, 3).map((r) => r.filename).join(' | ')
+  );
+  check(
+    '文件名含列标题',
+    (tdl.data?.results?.[0]?.filename || '').includes('第二季度'),
+    tdl.data?.results?.[0]?.filename
+  );
+  check(
+    '文件名保留 pdf 扩展名',
+    (tdl.data?.results?.[0]?.filename || '').endsWith('.pdf'),
+    tdl.data?.results?.[0]?.filename
+  );
+  check(
+    '跨页文件命名不重复',
+    new Set((tdl.data?.results || []).map((r) => r.filename)).size === 9,
+    `去重后 ${new Set((tdl.data?.results || []).map((r) => r.filename)).size} 个`
+  );
+
   console.log('\n面板控制台日志：');
   console.log(panel.logs.slice(-15).join('\n') || '（无）');
 }
@@ -365,11 +504,18 @@ main()
     fail++;
   })
   .finally(async () => {
+    if (aliveCheck) clearInterval(aliveCheck);
     console.log(`\n${'='.repeat(50)}`);
     console.log(`结果：${pass} 项通过，${fail} 项失败`);
     if (failures.length) {
       console.log('\n失败项：');
       failures.forEach((f) => console.log('  ✗ ' + f));
+      if (!browserAlive) {
+        console.log(
+          '\n⚠ 注意：测试期间浏览器已断开（可能窗口被手动关闭）。' +
+            '这种失败属于环境中断，不代表功能有问题，请重新运行。'
+        );
+      }
     }
     await sleep(300);
     cleanup();

@@ -30,7 +30,8 @@
 |---|---|---|
 | 📖 **读取网页** | `page.read` `page.links` `page.tables` `page.images` | 清洗后的 Markdown 正文、标题大纲、元信息、表格、链接、图片清单 |
 | 🎨 **修改网站样式** | `style.preset` `style.apply` `style.hide` | 深色模式、阅读模式、紧凑排版、全宽、隐藏图片；或注入任意 CSS（可限定作用域） |
-| ⬇️ **批量下载** | `media.list` `media.download` | 找出页面里的音视频/文档，带登录态 Cookie 与 Referer 批量下载 |
+| 📑 **表格批量下载** | `table.docs` `table.download` | **自动翻页**收集表格里每一行每一列的文档链接，按「行标签_列标题」命名下载 |
+| ⬇️ **批量下载** | `media.list` `media.download` | 找出页面里的音视频/文档，带登录态 Cookie 与 Referer 批量下载；HLS/DASH 流交给 ffmpeg 合并 |
 | 📄 **导出文档** | `doc.export` | 直接生成 Markdown / Word(.docx) / HTML / TXT |
 | 🖱️ **网页交互** | `page.click` `page.fill` `page.scroll` `page.highlight` | 点击、填表、滚动；操作前可高亮目标让你确认 |
 | 🗂️ **标签页管理** | `tab.*` `nav.back` | 列出、打开、切换、关闭标签页 |
@@ -71,16 +72,40 @@
 
 ### 可选：本地 companion
 
-只有这两种情况才需要：
+只有这几种情况才需要：
 
 - 官方 API 不允许浏览器直连（报 CORS 错误）→ 用**中继模式**
 - 想让外部 MCP 客户端（Claude Code / Cursor）驱动浏览器 → 用 **MCP 模式**
+- 想下载 **HLS/DASH 视频流**（`.m3u8` / `.mpd`）→ 需要 companion 调用 **ffmpeg** 合并分片
 
 ```bash
 node companion/server.mjs          # 仅 HTTP 服务（反代 + 桥接）
 node companion/server.mjs --mcp    # 额外启用 MCP stdio
 NBC_PORT=8788 node companion/server.mjs   # 换端口（扩展会自动发现 8787/8788/8789/8790/8888）
 ```
+
+#### 配置本地 ffmpeg / yt-dlp
+
+**扩展无法启动本地程序**（Chrome 安全限制），所以路径要在设置里填，由 companion 实际调用：
+
+> 设置 ⚙ → 「本地工具（可选）」→ 填 ffmpeg / yt-dlp 路径 → 点「检测」→ 保存
+
+![设置面板](docs/screenshot-settings.png)
+
+- **ffmpeg 路径** —— 合并 HLS/DASH 分片成单个视频文件
+- **yt-dlp 路径**（可选）—— 增强下载能力，能处理更多站点
+- **下载目录** —— ffmpeg / yt-dlp 产物的存放位置（默认 `~/Downloads`）
+
+配置会持久化到 `~/.netbrowserclaw/config.json`（不在仓库里），companion 重启后依然有效。
+
+#### 表格批量下载
+
+报表类页面上「每一行每一列都藏着一个 PDF 链接」时，直接说：
+
+> 把这个页面表格里所有的 PDF 都下载下来
+
+扩展会：自动翻页收集全部页面的链接 → 用「行标签_列标题.pdf」命名 → 批量下载。
+例如 `华东区_第二季度.pdf`、`华南区_第二季度.pdf`——而不是一堆 `download?id=123`。
 
 ### 可选：挂到 Claude Code / Cursor
 
@@ -135,15 +160,17 @@ docs/               可行性评估 · 架构设计 · 开源借鉴 · 路线图
 
 ```bash
 node scripts/make-icons.mjs     # 重新生成图标
-node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 36 项
-node scripts/verify-mcp.mjs     # MCP 联动验证                                  — 15 项
+node scripts/check-project.mjs  # 项目结构自检（manifest 引用 + 工具/handler 一致性）
+node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 51 项
+node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS）— 23 项
 ```
 
 验证脚本会**真实启动 Edge、加载扩展、打开测试页**，然后断言工具的**实际副作用**
-（广告位 `display` 是否真变成 `none`、背景色是否真变了、下载是否真落盘、
-DOCX 是否真能被 `zipfile` 解析），而不只是检查返回值。
+（广告位 `display` 是否真变成 `none`、背景色是否真变了、下载的文件是否真落盘、
+DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成可播放的视频），
+而不只是检查返回值。
 
-当前状态：**51/51 通过**。
+当前状态：**74/74 通过**。
 
 新增一个工具只要三步：
 
@@ -155,11 +182,14 @@ DOCX 是否真能被 `zipfile` 解析），而不只是检查返回值。
 
 ## 已知限制
 
-- **HLS/m3u8 流媒体不能在扩展内直接下载** —— 那是播放清单，需要合并分片。
-  companion 预留了 yt-dlp 接入点，v0.2 会补上。
+- **HLS/DASH 流媒体需要本地 companion + ffmpeg** —— 扩展无法合并分片（Chrome 不允许扩展启动本地进程）。
+  在设置里配好 ffmpeg 路径后即可自动处理；未配置时会返回明确提示而不是静默失败。
 - **DRM 加密内容（Netflix / 会员视频）无法下载** —— 这是加密设计，不是权限问题。
   本项目只处理你自身有权访问的内容。
 - **跨域 iframe 内容读不到** —— 需另开标签页。
+- **表格翻页依赖页面有可识别的「下一页」控件** —— 覆盖了常见分页写法
+  （`rel=next`、`aria-label`、`.next`、`.pagination`、文本「下一页/next/›/»」等）。
+  纯前端渲染且无分页控件的页面，需要用 `page.scroll` 滚动加载后再采集。
 - **DOCX 样式有限** —— 支持标题/段落/列表/引用/代码块/行内格式，
   不支持表格、图片、页眉页脚。复杂排版请用 companion + pandoc。
 - **扩展需要 `<all_urls>` 权限** —— 这是「在任意网站工作」的必要代价。

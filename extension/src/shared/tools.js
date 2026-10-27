@@ -241,7 +241,9 @@ export const TOOLS = [
     name: 'media.download',
     description:
       '批量下载资源文件。可传 urls 数组（字符串或 {url, filename} 对象）。' +
-      '会带上当前登录态的 Cookie 与 Referer，因此登录后才能访问的文件也能下载。',
+      '会带上当前登录态的 Cookie 与 Referer，因此登录后才能访问的文件也能下载。' +
+      'HLS/DASH 播放清单（.m3u8/.mpd）会自动转交本地 companion 用 ffmpeg 合并成单个文件；' +
+      '此时需要 companion 已运行且配置了 ffmpeg 路径，否则会返回明确错误。',
     parameters: {
       type: 'object',
       properties: {
@@ -265,6 +267,52 @@ export const TOOLS = [
         referer: { type: 'string', description: '可选的 Referer 头' },
       },
       required: ['urls'],
+    },
+  },
+
+  {
+    name: 'table.docs',
+    description:
+      '采集表格单元格里的文档下载链接（PDF/Word/Excel 等），并带上行标签与列标题。' +
+      '当页面上是清单/报表类表格、每一行每一列都藏着一个文档链接时使用。' +
+      '会自动翻页累积（最多 maxPages 页），返回每条链接的行/列上下文，' +
+      '便于确认要下载哪些、以及生成有意义的文件名。' +
+      '若目的是直接下载，请用 table.download。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'integer' },
+        exts: {
+          type: 'string',
+          description: '要识别的扩展名，逗号分隔。默认 "pdf,doc,docx,xls,xlsx,ppt,pptx,csv,zip"',
+        },
+        maxPages: { type: 'integer', description: '最多翻多少页，默认 10' },
+        waitMs: { type: 'integer', description: '每次翻页后等待加载的毫秒数，默认 1000' },
+        tableIndex: { type: 'integer', description: '只处理第几个表格；不填则处理全部' },
+      },
+    },
+  },
+  {
+    name: 'table.download',
+    description:
+      '批量下载表格中的所有文档链接（自动翻页收集全部页）。' +
+      '这是「把这个清单页上的 PDF 都下载下来」这类需求的正确工具。' +
+      '文件会用「行标签_列标题.pdf」的方式命名，避免下载出一堆无意义的文件名。' +
+      '下载前会返回每个文件的来源行/列，方便向用户确认。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'integer' },
+        exts: {
+          type: 'string',
+          description: '要下载的文档扩展名，逗号分隔。默认 "pdf,doc,docx,xls,xlsx,ppt,pptx,csv,zip"',
+        },
+        maxPages: { type: 'integer', description: '最多翻多少页，默认 10' },
+        waitMs: { type: 'integer', description: '每次翻页后等待加载的毫秒数，默认 1000' },
+        tableIndex: { type: 'integer', description: '只处理第几个表格' },
+        concurrency: { type: 'integer', description: '并发下载数，默认 3' },
+        referer: { type: 'string', description: '可选的 Referer 头' },
+      },
     },
   },
 

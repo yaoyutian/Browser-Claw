@@ -6,6 +6,17 @@
 
 import { ToolError, safeName, siteName, stamp, truncate, formatBytes, mimeOf, extOf } from '../shared/util.js';
 import { markdownToDocx } from '../shared/docx.js';
+import { findCompanion, companionFetch } from '../shared/companion.js';
+
+/** 判断是否为 HLS/DASH 播放清单（需要 ffmpeg 合并，扩展无法直接下载）。 */
+function isStreamManifest(url) {
+  try {
+    const p = new URL(url, 'https://x.invalid').pathname.toLowerCase();
+    return /\.(m3u8|mpd)$/.test(p);
+  } catch {
+    return /\.(m3u8|mpd)(\?|$)/i.test(String(url));
+  }
+}
 
 /** 向内容脚本发指令；脚本未注入时先用 chrome.scripting 兜底注入。 */
 async function sendToContent(tabId, message) {
@@ -93,25 +104,27 @@ function defaultName(url, contentType) {
  * 直连时用 chrome.downloads（自带浏览器 Cookie 上下文）；
  * 需要自定义 Referer 或走 blob: 时，改用 fetch + data: URL 中转。
  */
-async function downloadOne(url, { filename, referer, headers } = {}) {
+async function downloadOne(url, { filename, referer, headers, conflictAction = 'overwrite' } = {}) {
   if (referer || headers) {
-    return downloadViaFetch(url, { filename, referer, headers });
+    return downloadViaFetch(url, { filename, referer, headers, conflictAction });
   }
   try {
     const id = await chrome.downloads.download({
       url,
-      conflictAction: 'uniquify',
+      // 批量场景我们自己已经做了文件名去重，用 'overwrite' 避免叠加浏览器的 " (1)" 后缀；
+      // 单文件场景交给浏览器 uniquify 更安全。
+      conflictAction,
       saveAs: false,
       ...(filename ? { filename } : {}),
     });
     return { ok: true, id, url, mode: 'downloads-api' };
   } catch {
     // blob: 等 chrome.downloads 处理不了的地址，走 fetch。
-    return downloadViaFetch(url, { filename, referer, headers });
+    return downloadViaFetch(url, { filename, referer, headers, conflictAction });
   }
 }
 
-async function downloadViaFetch(url, { filename, referer, headers } = {}) {
+async function downloadViaFetch(url, { filename, referer, headers, conflictAction = 'overwrite' } = {}) {
   const requestHeaders = { ...(headers || {}) };
   if (referer) requestHeaders.Referer = referer;
   if (!requestHeaders.Cookie) {
@@ -130,7 +143,7 @@ async function downloadViaFetch(url, { filename, referer, headers } = {}) {
     const id = await chrome.downloads.download({
       url: dataUrl,
       filename: filename || defaultName(url, res.headers.get('content-type')),
-      conflictAction: 'uniquify',
+      conflictAction,
       saveAs: false,
     });
     return { ok: true, id, url, size: blob.size, mode: 'fetch' };
@@ -183,6 +196,7 @@ async function saveBlob(blob, filename) {
     const id = await chrome.downloads.download({
       url: dataUrl,
       filename: safeName(filename),
+      // 单文件导出用 uniquify：不同网页的同名文档不该互相覆盖。
       conflictAction: 'uniquify',
       saveAs: false,
     });
@@ -307,6 +321,140 @@ async function captureScreenshot(tabId) {
 // 工具分发表
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 表格文档批量下载
+// ---------------------------------------------------------------------------
+
+/** 把文本转成安全的文件名片段。 */
+function slug(text, max = 60) {
+  const s = String(text || '')
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+  return s || '';
+}
+
+/**
+ * 为表格里的文档生成有意义的文件名。
+ *
+ * 真实场景是「一行一列一个文件」，URL 里的文件名往往是 `download?id=123` 这种无意义值。
+ * 所以用「行标签 + 列标题」组合来命名，用户拿到文件一看就知道是什么。
+ */
+function tableDocFilename(item, index) {
+  const parts = [];
+  if (item.rowLabel) parts.push(slug(item.rowLabel));
+  if (item.colHeader) parts.push(slug(item.colHeader, 40));
+  if (!parts.length && item.text) parts.push(slug(item.text));
+
+  let base = parts.join('_');
+  if (!base) base = `file-${index + 1}`;
+
+  // 保留原扩展名
+  let ext = '';
+  try {
+    const m = new URL(item.href).pathname.match(/\.([a-z0-9]{1,5})$/i);
+    if (m) ext = '.' + m[1].toLowerCase();
+  } catch { /* ignore */ }
+  if (!ext) {
+    const m2 = (item.downloadAttr || '').match(/\.([a-z0-9]{1,5})$/i);
+    if (m2) ext = '.' + m2[1].toLowerCase();
+  }
+  if (!ext) ext = '.pdf';
+
+  return `${base}${ext}`;
+}
+
+/**
+ * 批量下载时给重复的文件名加序号后缀。
+ * 分页表格里不同页可能有相同的「行标签 + 列标题」组合，
+ * 不去重会互相覆盖。
+ */
+function dedupeFilenames(items) {
+  const seen = new Map();
+  return items.map((it, i) => {
+    const name = it.filename;
+    if (!seen.has(name)) {
+      seen.set(name, 1);
+      return it;
+    }
+    const n = seen.get(name) + 1;
+    seen.set(name, n);
+    const dot = name.lastIndexOf('.');
+    const unique = dot > 0 ? `${name.slice(0, dot)}_${n}${name.slice(dot)}` : `${name}_${n}`;
+    return { ...it, filename: unique };
+  });
+}
+
+/** 采集表格文档并生成下载清单。 */
+async function collectTableDocs(args) {
+  const data = await contentCall(
+    {
+      type: 'nbc:table:collect',
+      exts: args.exts,
+      maxPages: args.maxPages,
+      waitMs: args.waitMs,
+      tableIndex: args.tableIndex,
+    },
+    args.tabId
+  );
+  return data;
+}
+
+/** 表格文档批量下载：采集 → 命名 → 下载。 */
+async function downloadTableDocs(args) {
+  const collected = await collectTableDocs(args);
+  const items = collected.items || [];
+
+  if (!items.length) {
+    return {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      pages: collected.pages,
+      results: [],
+      note: '表格里没有找到文档链接',
+    };
+  }
+
+  const withNames = dedupeFilenames(
+    items.map((item, i) => ({
+      url: item.href,
+      filename: item.filename && item.filename !== item.text + '.pdf'
+        ? item.filename
+        : tableDocFilename(item, i),
+      _meta: {
+        rowLabel: item.rowLabel,
+        colHeader: item.colHeader,
+        text: item.text,
+        page: item.pageIndex,
+      },
+    }))
+  );
+
+  const results = await batchDownload(withNames, {
+    concurrency: args.concurrency || 3,
+    referer: args.referer,
+  });
+
+  return {
+    total: results.length,
+    succeeded: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    pages: collected.pages,
+    results: results.map((r, i) => ({
+      url: r.url,
+      ok: r.ok,
+      error: r.error,
+      size: r.size ? formatBytes(r.size) : undefined,
+      filename: withNames[i].filename,
+      rowLabel: withNames[i]._meta.rowLabel,
+      colHeader: withNames[i]._meta.colHeader,
+      page: withNames[i]._meta.page,
+    })),
+  };
+}
+
 export const handlers = {
   async 'page.read'(args) {
     const data = await contentCall({ type: 'nbc:extract' }, args.tabId);
@@ -423,6 +571,14 @@ export const handlers = {
     return contentCall({ type: 'nbc:style:clear' }, ctx.tabId);
   },
 
+  async 'table.docs'(args) {
+    return collectTableDocs(args);
+  },
+
+  async 'table.download'(args) {
+    return downloadTableDocs(args);
+  },
+
   async 'media.list'(args) {
     const list = await contentCall({ type: 'nbc:media:list' }, args.tabId);
     return list.slice(0, args.limit || 300);
@@ -432,10 +588,59 @@ export const handlers = {
     const urls = args.urls || [];
     if (!urls.length) throw new ToolError('没有要下载的 URL');
     const items = urls.map((u) => (typeof u === 'string' ? { url: u } : u));
-    const results = await batchDownload(items, {
-      concurrency: args.concurrency || 3,
-      referer: args.referer,
-    });
+
+    // HLS/DASH 清单无法在扩展内合并分片 —— 交给 companion 用 ffmpeg 处理。
+    const streamItems = items.filter((it) => isStreamManifest(it.url));
+    const directItems = items.filter((it) => !isStreamManifest(it.url));
+
+    const results = [];
+    if (directItems.length) {
+      const directResults = await batchDownload(directItems, {
+        concurrency: args.concurrency || 3,
+        referer: args.referer,
+      });
+      results.push(...directResults);
+    }
+
+    if (streamItems.length) {
+      const companion = await findCompanion();
+      if (!companion) {
+        for (const it of streamItems) {
+          results.push({
+            url: it.url,
+            ok: false,
+            error:
+              'HLS/DASH 流需要本地 companion + ffmpeg 才能下载（扩展无法合并分片）。' +
+              '请运行 node companion/server.mjs 并在设置里配置 ffmpeg 路径。',
+          });
+        }
+      } else {
+        for (const it of streamItems) {
+          const res = await companionFetch(
+            '/hls',
+            {
+              targetUrl: it.url,
+              filename: it.filename,
+              referer: it.referer || args.referer,
+              cookie: await cookieHeaderFor(it.url),
+            },
+            { timeout: 300_000 }
+          );
+          if (res.ok) {
+            results.push({
+              url: it.url,
+              ok: true,
+              size: res.data?.size,
+              mode: 'ffmpeg',
+              path: res.data?.path,
+            });
+          } else {
+            results.push({ url: it.url, ok: false, error: res.error, detail: res.detail });
+          }
+        }
+      }
+    }
+
     const ok = results.filter((r) => r.ok).length;
     return {
       total: results.length,
@@ -446,6 +651,8 @@ export const handlers = {
         ok: r.ok,
         error: r.error,
         size: r.size ? formatBytes(r.size) : undefined,
+        mode: r.mode,
+        path: r.path,
       })),
     };
   },

@@ -5,7 +5,7 @@
 // 用法：node scripts/verify-mcp.mjs
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,9 +42,37 @@ writeFileSync(
   join(webRoot, 'p.html'),
   `<!doctype html><meta charset="utf-8"><title>MCP 测试页</title>
 <article><h1>MCP 联动测试</h1><p>这段文字用于验证 MCP 能否读到真实页面内容。</p>
-<a href="/x.pdf">报告 PDF</a></article>`
+<a href="/x.pdf">报告 PDF</a></article>
+<table><thead><tr><th>项目</th><th>文件</th></tr></thead>
+<tbody><tr><td>华东区</td><td><a href="/docs/a.pdf" download>下载</a></td></tr>
+<tr><td>华南区</td><td><a href="/docs/b.pdf" download>下载</a></td></tr></tbody></table>`
 );
+mkdirSync(join(webRoot, 'docs'), { recursive: true });
+writeFileSync(join(webRoot, 'docs', 'a.pdf'), Buffer.from('%PDF-1.4\n% mcp a\n', 'latin1'));
+writeFileSync(join(webRoot, 'docs', 'b.pdf'), Buffer.from('%PDF-1.4\n% mcp b\n', 'latin1'));
 const webServer = spawn('python', ['-m', 'http.server', String(WEB_PORT), '--directory', webRoot], { stdio: 'ignore' });
+/** 探测本机 ffmpeg（用于验证本地工具配置链路）。 */
+function findFfmpeg() {
+  if (process.env.NBC_TEST_FFMPEG) return process.env.NBC_TEST_FFMPEG;
+  for (const p of [
+    'C:/ProgramData/chocolatey/bin/ffmpeg.exe',
+    'C:/Program Files/ffmpeg/bin/ffmpeg.exe',
+    '/usr/bin/ffmpeg',
+    '/usr/local/bin/ffmpeg',
+    // 常见的绿色版安装位置
+    'C:/commontools/ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe',
+    'C:/ffmpeg/bin/ffmpeg.exe',
+  ]) {
+    if (existsSync(p)) return p;
+  }
+  // 借助 PATH
+  const r = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8', shell: true });
+  if (r.status === 0) return 'ffmpeg';
+  return '';
+}
+
+const FFMPEG = findFfmpeg();
+
 const browserProc = spawn(browser, [
   `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
   `--load-extension=${EXT}`, `--disable-extensions-except=${EXT}`,
@@ -122,7 +150,21 @@ const rpc = (method, params) => new Promise((res) => {
   companion.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
 });
 
+// 测试依赖 Edge 持续运行；若中途被关闭，后续断言会莫名失败。
+let browserAlive = true;
+let aliveCheck = null;
+
+function startAliveCheck() {
+  aliveCheck = setInterval(() => {
+    httpJson('/json/list')
+      .then(() => { browserAlive = true; })
+      .catch(() => { browserAlive = false; });
+  }, 2000);
+}
+
 async function main() {
+  startAliveCheck();
+
   // 1. MCP 协议握手
   console.log('\n[1] MCP 协议');
   const init = await rpc('initialize', {
@@ -202,8 +244,88 @@ async function main() {
   const unknown = await rpc('tools/call', { name: 'nonexistent_tool', arguments: {} });
   check('未知工具返回错误', unknown.result?.isError === true);
 
-  // 5. proxy
-  console.log('\n[5] companion 反向代理');
+  // 5. 表格文档批量下载（经 MCP）
+  console.log('\n[5] MCP 表格批量下载');
+  const tableDocs = await rpc('tools/call', { name: 'browser_table_downloads', arguments: { exts: 'pdf' } });
+  const tableText = tableDocs.result?.content?.[0]?.text || '';
+  check('browser_table_downloads 执行成功', tableDocs.result?.isError !== true, tableText.slice(0, 60));
+  check('采集到表格里的 PDF', tableText.includes('rowLabel') && tableText.includes('colHeader'));
+
+  // 6. 本地工具配置（ffmpeg 路径）
+  console.log('\n[6] companion 本地工具配置');
+  const cfg = await (
+    await fetch(`http://127.0.0.1:${NBC_PORT}/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ffmpegPath: FFMPEG,
+        downloadDir: webRoot,
+      }),
+    })
+  ).json();
+  check('配置接口返回成功', cfg.ok === true, cfg.error || '');
+  check(
+    'ffmpeg 路径检测结果已返回',
+    typeof cfg.config?.ffmpegDetected?.ok === 'boolean',
+    JSON.stringify(cfg.config?.ffmpegDetected)
+  );
+  if (process.env.NBC_TEST_FFMPEG) {
+    check('检测到可用的 ffmpeg', cfg.config?.ffmpegDetected?.ok === true, cfg.config?.ffmpegDetected?.version);
+  }
+
+  // 7. HLS 合并（扩展 → companion → ffmpeg）
+  console.log('\n[7] HLS 流合并（ffmpeg）');
+  if (FFMPEG) {
+    // 造一个真实的 HLS：3 个 TS 分片 + m3u8 清单
+    const segDir = join(webRoot, 'hls');
+    mkdirSync(segDir, { recursive: true });
+    const made = spawnSync(
+      FFMPEG,
+      [
+        '-f', 'lavfi', '-i', 'testsrc=duration=3:size=320x240:rate=15',
+        '-c:v', 'libx264', '-g', '15', '-f', 'segment', '-segment_time', '1',
+        '-segment_format', 'mpegts', join(segDir, 'seg%03d.ts'), '-y',
+      ],
+      { encoding: 'utf8' }
+    );
+    const segs = existsSync(join(segDir, 'seg001.ts'))
+      ? ['seg000.ts', 'seg001.ts', 'seg002.ts']
+      : [];
+    if (segs.length) {
+      writeFileSync(
+        join(segDir, 'playlist.m3u8'),
+        '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n' +
+          segs.map((s) => `#EXTINF:1.0,\n${s}`).join('\n') +
+          '\n#EXT-X-ENDLIST\n'
+      );
+      const hls = await (
+        await fetch(`http://127.0.0.1:${NBC_PORT}/hls`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            targetUrl: `http://127.0.0.1:${WEB_PORT}/hls/playlist.m3u8`,
+            filename: 'nbc-hls-verify',
+          }),
+        })
+      ).json();
+      check('HLS 合并成功', hls.ok === true, hls.error || hls.detail?.slice(0, 120));
+      check('产物已生成', existsSync(hls.path || ''), hls.path || '');
+      if (hls.ok && existsSync(hls.path)) {
+        const size = statSync(hls.path).size;
+        check('产物非空', size > 1000, `${size} 字节`);
+        const probe = spawnSync(FFMPEG, ['-i', hls.path], { encoding: 'utf8' });
+        check('ffprobe 可解析产物', /Duration: 00:00:0[23]/.test(probe.stderr || ''),
+          (probe.stderr || '').match(/Duration: [0-9:.]+/)?.[0] || '');
+      }
+    } else {
+      check('生成测试用 HLS 分片', false, made.stderr?.slice(0, 120) || 'ffmpeg 未产出分片');
+    }
+  } else {
+    console.log('  (跳过：本机未找到 ffmpeg)');
+  }
+
+  // 7. proxy
+  console.log('\n[7] companion 反向代理');
   const proxied = await fetch(`http://127.0.0.1:${NBC_PORT}/proxy`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target: `http://127.0.0.1:${WEB_PORT}/p.html`, method: 'GET' }),
@@ -215,9 +337,18 @@ async function main() {
 main()
   .catch((e) => { console.error('出错：', e); fail++; })
   .finally(async () => {
+    if (aliveCheck) clearInterval(aliveCheck);
     console.log(`\n${'='.repeat(50)}`);
     console.log(`结果：${pass} 项通过，${fail} 项失败`);
-    if (failures.length) failures.forEach((f) => console.log('  ✗ ' + f));
+    if (failures.length) {
+      failures.forEach((f) => console.log('  ✗ ' + f));
+      if (!browserAlive) {
+        console.log(
+          '\n⚠ 注意：测试期间浏览器已断开（可能窗口被手动关闭）。' +
+            '这种失败属于环境中断，不代表功能有问题，请重新运行。'
+        );
+      }
+    }
     await sleep(300);
     cleanup();
     process.exit(fail ? 1 : 0);

@@ -7,53 +7,20 @@
 // 扩展没有连接 companion 时完全不影响正常使用（轮询失败静默重试）。
 
 import { handlers } from './handlers.js';
+import { findCompanion, DEFAULT_COMPANION_URL } from '../shared/companion.js';
 
 const POLL_INTERVAL_MS = 20_000; // companion 侧长轮询上限是 20s，这里略短避免堆积
-const STORAGE_KEY = 'nbc:settings';
 
 let running = false;
-let relayUrl = 'http://127.0.0.1:8787';
+let relayUrl = DEFAULT_COMPANION_URL;
 // 上一次执行的结果，随下一个 poll 请求一起带回去。
 // 独立 POST 偶发丢失（连接复用/休眠），带回机制保证结果不丢。
 let pendingResults = [];
 
-/**
- * 候选 companion 地址。用户在设置里配的地址优先，
- * 其次是几个常见端口 —— 这样即使用户用 NBC_PORT=8788 启动 companion，
- * 扩展也能自动发现，不必手动改配置。
- */
-const CANDIDATE_PORTS = [8787, 8788, 8789, 8790, 8888];
-
+/** 找到可用的 companion 地址（设置优先，其次常见端口）。 */
 async function getRelayUrl() {
-  try {
-    const stored = await chrome.storage.local.get(STORAGE_KEY);
-    const cfg = stored[STORAGE_KEY] || {};
-    const configured = (cfg.relayUrl || '').replace(/\/+$/, '');
-    if (configured) {
-      const health = await probe(configured);
-      if (health) return configured;
-    }
-  } catch { /* 忽略，走候选端口探测 */ }
-
-  for (const port of CANDIDATE_PORTS) {
-    const url = `http://127.0.0.1:${port}`;
-    if (await probe(url)) return url;
-  }
-  return relayUrl;
-}
-
-/** 探测地址是否为可用 companion。 */
-async function probe(url) {
-  try {
-    const res = await fetch(`${url}/health`, {
-      signal: AbortSignal.timeout(1500),
-    });
-    if (!res.ok) return false;
-    const data = await res.json();
-    return data?.name === 'netbrowserclaw-companion';
-  } catch {
-    return false;
-  }
+  const found = await findCompanion();
+  return found || relayUrl;
 }
 
 /** 执行一个工具（复用 handlers.js 中的实现）。 */

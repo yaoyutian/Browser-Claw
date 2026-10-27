@@ -109,6 +109,35 @@
         <input id="inp-maxtokens" type="number" min="512" step="512" placeholder="8192" />
       </section>
 
+      <section class="field">
+        <label>本地工具（可选）</label>
+        <p class="hint">
+          扩展无法直接启动本地程序，需要由本地 companion 执行。
+          配置路径后会推送给 companion，用于合并 HLS/DASH 视频流。
+        </p>
+
+        <label for="inp-ffmpeg" class="sub-label">ffmpeg 路径</label>
+        <div class="row">
+          <input id="inp-ffmpeg" type="text" placeholder="C:\path\to\ffmpeg.exe" />
+          <button id="btn-detect-ffmpeg" class="mini-btn" title="检测这个路径是否可用">检测</button>
+        </div>
+        <p class="hint" id="ffmpeg-status"></p>
+
+        <label for="inp-ytdlp" class="sub-label">yt-dlp 路径（可选）</label>
+        <div class="row">
+          <input id="inp-ytdlp" type="text" placeholder="C:\path\to\yt-dlp.exe" />
+          <button id="btn-detect-ytdlp" class="mini-btn" title="检测这个路径是否可用">检测</button>
+        </div>
+        <p class="hint" id="ytdlp-status"></p>
+
+        <label for="inp-dl-dir" class="sub-label">下载目录</label>
+        <div class="row">
+          <input id="inp-dl-dir" type="text" placeholder="C:\Users\你\Downloads" />
+          <button id="btn-detect-dir" class="mini-btn" title="检测目录是否存在">检测</button>
+        </div>
+        <p class="hint" id="dl-dir-status"></p>
+      </section>
+
       <div class="settings-actions">
         <button id="btn-save-settings" class="primary-btn">保存</button>
         <span id="save-status" class="hint"></span>
