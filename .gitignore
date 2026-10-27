@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+
+# 构建产物（本项目零构建，保留此文件以防将来引入工具链）
+dist/
+build/
+*.zip
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+npm-debug.log*
+
+# 本地环境
+.env
+.env.local

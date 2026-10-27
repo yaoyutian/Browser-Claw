@@ -1,0 +1,43 @@
+name: verify
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # 语法与结构检查（跨平台，无需浏览器）
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 检查 JS 语法
+        run: |
+          set -e
+          for f in $(find extension companion scripts -name '*.js' -o -name '*.mjs'); do
+            echo "  checking $f"
+            node --check "$f"
+          done
+
+      - name: 项目结构自检
+        run: node scripts/check-project.mjs
+
+  # 真实浏览器端到端验证
+  e2e:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 端到端验证（Edge）
+        run: node scripts/verify-e2e.mjs
+
+      - name: MCP 联动验证
+        run: node scripts/verify-mcp.mjs

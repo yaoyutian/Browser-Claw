@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NetBrowserClaw</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <span class="name">NetBrowserClaw</span>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-context" class="icon-btn" title="插入当前页面上下文">⟨页⟩</button>
+      <button id="btn-clear" class="icon-btn" title="清空对话">✕</button>
+      <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
+    </div>
+  </header>
+
+  <div id="provider-bar" class="provider-bar">
+    <span id="provider-dot" class="dot"></span>
+    <span id="provider-name">未配置模型</span>
+    <button id="btn-switch-model" class="link-btn">切换</button>
+  </div>
+
+  <main id="messages" class="messages"></main>
+
+  <div id="tool-tray" class="tool-tray" hidden></div>
+
+  <footer class="composer">
+    <div class="composer-row">
+      <textarea id="input" rows="1" placeholder="问我关于这个网页的任何事…"></textarea>
+      <button id="btn-send" class="send-btn" title="发送">↑</button>
+    </div>
+    <div class="composer-hint">
+      <label class="checkbox" title="关闭后，每次工具执行前都会询问你确认">
+        <input type="checkbox" id="chk-auto" checked /> 自动执行工具
+      </label>
+      <span id="status-hint" class="hint">Enter 发送</span>
+      <span id="toast-hint" class="hint"></span>
+    </div>
+  </footer>
+
+  <!-- 设置抽屉 -->
+  <aside id="settings" class="settings" hidden>
+    <div class="settings-head">
+      <h2>设置</h2>
+      <button id="btn-close-settings" class="icon-btn">✕</button>
+    </div>
+
+    <div class="settings-body">
+      <section class="field">
+        <label for="sel-provider">模型服务商</label>
+        <select id="sel-provider"></select>
+        <p class="hint" id="provider-hint"></p>
+      </section>
+
+      <section class="field">
+        <label for="inp-model">模型</label>
+        <div class="row">
+          <input id="inp-model" type="text" placeholder="模型名称" list="model-suggestions" />
+          <datalist id="model-suggestions"></datalist>
+          <button id="btn-fetch-models" class="mini-btn" title="从服务端拉取模型列表">拉取</button>
+        </div>
+      </section>
+
+      <section class="field">
+        <label for="inp-key">API Key</label>
+        <div class="row">
+          <input id="inp-key" type="password" placeholder="sk-…" autocomplete="off" />
+          <button id="btn-toggle-key" class="mini-btn" title="显示/隐藏">👁</button>
+        </div>
+        <p class="hint">Key 只保存在本机浏览器存储中，不上传任何服务器。</p>
+      </section>
+
+      <section class="field">
+        <label for="inp-baseurl">接口地址 (Base URL)</label>
+        <input id="inp-baseurl" type="text" placeholder="https://api.example.com/v1" />
+        <p class="hint">OpenAI 兼容接口填到 <code>/v1</code> 即可。</p>
+      </section>
+
+      <section class="field">
+        <label for="sel-transport">连接方式</label>
+        <select id="sel-transport">
+          <option value="direct">浏览器直连（默认，无需额外组件）</option>
+          <option value="relay">本地中继（解决 CORS / 网络限制）</option>
+        </select>
+        <p class="hint" id="transport-hint"></p>
+      </section>
+
+      <section class="field">
+        <label for="inp-relay">中继服务地址</label>
+        <input id="inp-relay" type="text" placeholder="http://127.0.0.1:8787" />
+        <p class="hint">
+          运行 <code>node companion/server.mjs</code> 后可用。中继会把请求转发到 API，
+          用于官方接口不允许浏览器直连的场景。
+        </p>
+      </section>
+
+      <section class="field">
+        <label for="inp-temp">温度 <span id="temp-value" class="mono">0.7</span></label>
+        <input id="inp-temp" type="range" min="0" max="2" step="0.1" value="0.7" />
+      </section>
+
+      <section class="field">
+        <label for="inp-maxtokens">最大输出 tokens</label>
+        <input id="inp-maxtokens" type="number" min="512" step="512" placeholder="8192" />
+      </section>
+
+      <div class="settings-actions">
+        <button id="btn-save-settings" class="primary-btn">保存</button>
+        <span id="save-status" class="hint"></span>
+      </div>
+
+      <section class="field danger">
+        <h3>数据与隐私</h3>
+        <p class="hint">
+          本扩展不设服务器、不做遥测。API Key 保存在 Chrome 本地存储；
+          对话记录只存在内存中，关闭面板即清空。
+        </p>
+        <button id="btn-clear-storage" class="mini-btn">清除全部本地数据</button>
+      </section>
+    </div>
+  </aside>
+
+  <script type="module" src="panel.js"></script>
+</body>
+</html>

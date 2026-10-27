@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "NetBrowserClaw",
+  "version": "0.1.0",
+  "description": "开源的浏览器 AI 侧边栏：让任意大模型读取网页、修改样式、批量下载媒体与文档、导出内容。",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "sidePanel",
+    "scripting",
+    "storage",
+    "tabs",
+    "downloads",
+    "activeTab",
+    "contextMenus",
+    "cookies",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "打开 NetBrowserClaw 侧边栏",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/panel.html"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": false,
+      "run_at": "document_start",
+      "js": [
+        "src/content/media.js",
+        "src/content/extractor.js",
+        "src/content/style-agent.js",
+        "src/content/content.js"
+      ]
+    }
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Ctrl+Shift+K", "mac": "Command+Shift+K" },
+      "description": "打开侧边栏"
+    }
+  }
+}
