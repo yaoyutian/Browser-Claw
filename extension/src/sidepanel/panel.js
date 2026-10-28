@@ -28,6 +28,8 @@ const el = {
   switchModel: $('btn-switch-model'),
   statusHint: $('toast-hint'),
   auto: $('chk-auto'),
+  selectionBar: $('selection-bar'),
+  selectionText: $('selection-text'),
 };
 
 const state = {
@@ -35,6 +37,7 @@ const state = {
   provider: null,
   busy: false,
   controller: null,
+  selection: null,
   tools: {
     ffmpegPath: '',
     ytdlpPath: '',
@@ -676,7 +679,66 @@ chrome.runtime.onMessage.addListener((msg) => {
     el.input.focus();
     el.input.dispatchEvent(new Event('input'));
   }
+  if (msg?.type === 'nbc:ui:selection') {
+    showSelection(msg.info);
+  }
 });
+
+// ---------------------------------------------------------------------------
+// 划词提问
+// ---------------------------------------------------------------------------
+
+function showSelection(info) {
+  if (!info?.text) return;
+  state.selection = info;
+  el.selectionText.textContent = info.text;
+  el.selectionBar.hidden = false;
+}
+
+$('btn-close-selection').addEventListener('click', () => {
+  el.selectionBar.hidden = true;
+  state.selection = null;
+});
+
+$('btn-ask-selection').addEventListener('click', () => {
+  const sel = state.selection;
+  if (!sel) return;
+  const quoted = sel.text.length > 300 ? sel.text.slice(0, 300) + '…' : sel.text;
+  el.input.value = `关于这段内容：\n「${quoted}」\n\n`;
+  el.selectionBar.hidden = true;
+  el.input.focus();
+  el.input.dispatchEvent(new Event('input'));
+  el.input.setSelectionRange(el.input.value.length, el.input.value.length);
+});
+
+/** 侧边栏打开时，主动检查当前页面是否已有选区。 */
+async function checkCurrentSelection() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || !/^https?:/.test(tab.url || '')) return;
+    // 走后台的 MAIN world 查询 —— 隔离世界读不到真实选区。
+    const res = await chrome.runtime.sendMessage({
+      type: 'nbc:tool',
+      name: 'page.selection',
+      args: { tabId: tab.id },
+    });
+    if (res?.ok && res.data?.text) showSelection(res.data);
+  } catch {
+    // 页面不支持或未注入，忽略
+  }
+}
+
+/**
+ * 调用一个浏览器工具。
+ * 优先走后台消息通道；若后台正在重启导致无响应，
+ * 直接用 scripting 在页面里取（只支持少数无需后台权限的工具）。
+ */
+async function callTool(name, args = {}) {
+  const res = await chrome.runtime.sendMessage({ type: 'nbc:tool', name, args });
+  if (!res) throw new Error('后台无响应（service worker 可能正在重启，请重试）');
+  if (!res.ok) throw new Error(res.error || '工具执行失败');
+  return res.data;
+}
 
 // 快捷键：Ctrl+Shift+K 由 manifest commands 处理，这里只做聚焦兜底
 chrome.commands?.onCommand?.addListener?.(() => el.input.focus());
@@ -690,6 +752,7 @@ chrome.commands?.onCommand?.addListener?.(() => el.input.focus());
   fillProviderSelect();
   updateProviderBar();
   el.input.focus();
+  checkCurrentSelection();
 
   if (!state.provider.apiKey && !PRESET_MAP[state.provider.providerId]?.noKey) {
     el.messages.innerHTML =

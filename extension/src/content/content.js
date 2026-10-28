@@ -442,10 +442,54 @@
    * restartFromFirst：先点「上一页」回到第一页再开始，
    * 避免受当前停留页影响（否则重复调用只会拿到当前页往后的数据）。
    */
-  async function collectTableDocs({ exts, maxPages = 10, waitMs = 1000, tableIndex, restartFromFirst = true } = {}) {
+  /**
+   * 加载更多内容 —— 两种策略，按可用性自动选择：
+   *   1. 有「下一页」控件 → 点击翻页（传统分页）
+   *   2. 没有分页控件   → 滚动到底部触发懒加载（无限滚动）
+   *
+   * 返回 'paged' | 'scrolled' | 'none' 表示本次用了哪种方式。
+   */
+  async function loadMore(waitMs) {
+    const next = findNextButton();
+    if (next) {
+      const before = tableSignature();
+      next.click();
+      const changed = await waitForTableChange(before);
+      if (!changed) return 'none';
+      await new Promise((r) => setTimeout(r, waitMs));
+      return 'paged';
+    }
+
+    // 无限滚动：滚到底部，等内容加载
+    const before = tableSignature();
+    const beforeHeight = document.body.scrollHeight;
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' });
+    // 有些站点用 IntersectionObserver 触发加载，等久一点
+    await new Promise((r) => setTimeout(r, Math.max(waitMs, 1200)));
+    const changed = tableSignature() !== before;
+    const grew = document.body.scrollHeight > beforeHeight;
+    return changed || grew ? 'scrolled' : 'none';
+  }
+
+  /**
+   * 跨页/跨屏采集表格中的文档链接。
+   *
+   * 自动适配两种页面形态：
+   *   · 传统分页 —— 点「下一页」逐页累积
+   *   · 无限滚动 —— 滚动到底部触发懒加载，直到内容不再增长
+   */
+  async function collectTableDocs({
+    exts,
+    maxPages = 10,
+    waitMs = 1000,
+    tableIndex,
+    restartFromFirst = true,
+    scroll = 'auto',
+  } = {}) {
     const pages = [];
     const all = [];
     const seen = new Set();
+    const maxSteps = Math.max(1, maxPages);
 
     // 回到第一页。
     // 若「上一页」点了没反应（说明已在首页），立刻停止 —— 否则每次调用都要白等一个超时。
@@ -461,38 +505,123 @@
       }
     }
 
-    for (let p = 0; p < Math.max(1, maxPages); p++) {
+    let mode = null; // 'paged' | 'scrolled'
+    // 虚拟滚动列表会回收 DOM，已滚过的行会从表格里消失。
+    // 所以每轮把采集到的链接累积到这里，不依赖表格一直保留。
+    const harvested = new Map();
+
+    for (let step = 0; step < maxSteps; step++) {
       const docs = extractTableDocs({ exts, tableIndex });
       for (const d of docs) {
         const key = `${d.href}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        all.push({ ...d, pageIndex: p + 1 });
+        if (harvested.has(key)) continue;
+        harvested.set(key, { ...d, pageIndex: step + 1 });
       }
-      pages.push({ page: p + 1, found: docs.length, total: all.length });
+      for (const item of harvested.values()) {
+        if (!seen.has(item.href)) {
+          seen.add(item.href);
+          all.push(item);
+        }
+      }
+      pages.push({ page: step + 1, found: docs.length, total: all.length });
 
-      if (p + 1 >= maxPages) break;
-      const next = findNextButton();
-      if (!next) break;
-
-      const before = tableSignature();
-      next.click();
-      const changed = await waitForTableChange(before);
-      await new Promise((r) => setTimeout(r, waitMs));
-      if (!changed) {
-        pages.push({ page: p + 2, note: '内容未变化，停止翻页' });
+      if (step + 1 >= maxSteps) {
+        pages.push({ page: step + 2, note: `已达上限 ${maxSteps} 次加载` });
         break;
       }
 
-      // 翻页后若「下一页」已失效，说明已到最后一页。
-      if (!findNextButton()) {
-        pages.push({ page: p + 2, note: '已到最后一页' });
+      // 第一次决定用哪种加载方式，之后保持一致
+      if (!mode) {
+        mode = findNextButton() ? 'paged' : (scroll === 'auto' ? 'scrolled' : 'paged');
+      }
+
+      const result = await loadMore(waitMs);
+      if (result === 'none') {
+        pages.push({
+          page: step + 2,
+          note: mode === 'scrolled' ? '滚动到底部后无新内容，已到末尾' : '内容未变化，停止翻页',
+        });
         break;
       }
+      if (result === 'scrolled') mode = 'scrolled';
     }
 
-    return { pages, total: all.length, items: all };
+    return {
+      pages,
+      total: all.length,
+      mode: mode || 'single',
+      items: all,
+    };
   }
+
+  // -------------------------------------------------------------------------
+  // 划词提问
+  //
+  // 监听用户在页面上的选区，把「选中的文字 + 所在页面」转发给侧边栏。
+  // 侧边栏可能没打开，此时消息会失败 —— 忽略即可，用户打开侧边栏后可用。
+  // -------------------------------------------------------------------------
+
+  const selectionListeners = new Set();
+  let lastSelectionText = '';
+
+  /**
+   * 读取当前选区。
+   *
+   * 关键：内容脚本运行在**隔离世界**，那里有独立的 selection 状态，
+   * 读不到用户在页面上真正选中的内容（实测返回 null）。
+   * 真实选区只在 MAIN world 里，所以由 selection-probe.js 负责读取，
+   * 这里通过 postMessage 接收结果。
+   */
+  function getSelectionInfo() {
+    return lastSelectionInfo;
+  }
+  let lastSelectionInfo = null;
+
+  /** 接收 MAIN world 探针上报的选区。 */
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.__nbc_selection__ !== true) return;
+    const info = {
+      text: String(data.text || ''),
+      context: data.context || '',
+      url: data.url || location.href,
+      title: data.title || document.title,
+    };
+    if (!info.text || info.text === lastSelectionText) return;
+    lastSelectionText = info.text;
+    lastSelectionInfo = info;
+
+    for (const fn of selectionListeners) {
+      try {
+        fn(info);
+      } catch { /* ignore */ }
+    }
+    chrome.runtime.sendMessage({ type: 'nbc:selection', info }).catch(() => {});
+  });
+
+  /** 请求后台把 MAIN world 探针注入到当前页面。 */
+  function requestProbe() {
+    chrome.runtime.sendMessage({ type: 'nbc:selection:probe' }).catch(() => {});
+  }
+
+  // 页面加载后请求注入探针。
+  // document_start 时页面可能还没导航到最终 URL，注入会失败 ——
+  // 所以 DOMContentLoaded 后再试一次，并且用户首次交互时再兜底一次。
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', requestProbe, { once: true });
+  } else {
+    requestProbe();
+  }
+  setTimeout(requestProbe, 1500);
+  // 首次真实交互时确保探针已就绪（覆盖前两次都失败的极端情况）
+  const ensureProbeOnce = () => {
+    requestProbe();
+    window.removeEventListener('pointerdown', ensureProbeOnce, true);
+    window.removeEventListener('keydown', ensureProbeOnce, true);
+  };
+  window.addEventListener('pointerdown', ensureProbeOnce, true);
+  window.addEventListener('keydown', ensureProbeOnce, true);
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
@@ -528,6 +657,9 @@
             call(window.__nbcStyleAgent.clearAll);
             sendResponse({ ok: true });
             break;
+          case 'nbc:style:applyRules':
+            sendResponse({ ok: true, data: call(window.__nbcStyleAgent.applyRules, msg.rules) });
+            break;
           case 'nbc:interactive:list':
             sendResponse({ ok: true, data: listInteractive(msg.limit) });
             break;
@@ -557,6 +689,10 @@
             break;
           case 'nbc:table:collect':
             sendResponse({ ok: true, data: await collectTableDocs(msg) });
+            break;
+          case 'nbc:selection:current':
+            // 隔离世界读不到真实选区，返回最近一次由 MAIN world 探针上报的值。
+            sendResponse({ ok: true, data: getSelectionInfo() });
             break;
           case 'nbc:eval':
             // 实际执行在后台的 MAIN world 中完成（扩展 CSP 禁止 unsafe-eval）。

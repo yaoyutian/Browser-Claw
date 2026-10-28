@@ -641,6 +641,35 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: 'browser_read_selection',
+    description: '读取用户在当前页面上选中的文字（连同所在段落的上下文）。',
+    inputSchema: {
+      type: 'object',
+      properties: { tabId: { type: 'integer' } },
+    },
+  },
+  {
+    name: 'browser_save_site_style',
+    description:
+      '把当前页面已注入的样式规则按域名保存，之后访问该网站会自动应用同样的改版。' +
+      '（例如让某个站点永久使用深色模式）',
+    inputSchema: {
+      type: 'object',
+      properties: { tabId: { type: 'integer' } },
+    },
+  },
+  {
+    name: 'browser_list_site_styles',
+    description: '列出已保存样式规则的站点，或清除当前站点的规则。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'clear'] },
+        tabId: { type: 'integer' },
+      },
+    },
+  },
+  {
     name: 'browser_list_tabs',
     description: '列出所有打开的网页标签页。',
     inputSchema: { type: 'object', properties: {} },
@@ -672,6 +701,9 @@ const MCP_TO_DISPATCH = {
   browser_fill: (a) => ['page.fill', { selector: a.selector, index: a.index, value: a.value, submit: a.submit }],
   browser_table_downloads: (a) => ['table.docs', { exts: a.exts, maxPages: a.maxPages, tabId: a.tabId }],
   browser_download_table: (a) => ['table.download', { exts: a.exts, maxPages: a.maxPages, tabId: a.tabId }],
+  browser_read_selection: (a) => ['page.selection', { tabId: a.tabId }],
+  browser_save_site_style: (a) => ['style.save', { tabId: a.tabId }],
+  browser_list_site_styles: (a) => ['style.rules', { action: a.action, tabId: a.tabId }],
   browser_list_tabs: () => ['tab.list', {}],
   browser_open_tab: (a) => ['tab.open', { url: a.url }],
 };

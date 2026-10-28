@@ -91,6 +91,57 @@ for (let i = 1; i <= 9; i++) {
     Buffer.from(`%PDF-1.4\n% nbc table test doc ${i}\n`, 'latin1')
   );
 }
+// --- 无限滚动表格测试页：无分页控件，滚动到底部才加载下一批 ---
+writeFileSync(
+  join(webRoot, 'scroll-table.html'),
+  `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>无限滚动报表</title>
+<style>body{font-family:sans-serif;margin:0}table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #ccc;padding:6px}#spacer{height:2000px}</style></head><body>
+<h1>无限滚动报表</h1>
+<table id="tbl">
+<thead><tr><th>批次</th><th>项目</th><th>第二季度</th></tr></thead>
+<tbody id="tbody"></tbody></table>
+<div id="spacer"></div>
+<script>
+let batch = 0;
+function loadMore(){
+  batch += 1;
+  const tb = document.getElementById('tbody');
+  for (let i = 0; i < 3; i++) {
+    const n = (batch-1)*3 + i + 1;
+    const tr = document.createElement('tr');
+    ['批次'+batch, '项目'+n, ''].forEach(function(cell, ci){
+      const td = document.createElement('td');
+      if (ci < 2) { td.textContent = cell; }
+      else {
+        const a = document.createElement('a');
+        a.href = 'docs/sdoc' + n + '.pdf';
+        a.textContent = '下载';
+        a.setAttribute('download', '');
+        td.appendChild(a);
+      }
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  }
+}
+// 滚到底部时加载下一批（模拟无限滚动）
+window.addEventListener('scroll', function(){
+  if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 100 && batch < 3) {
+    loadMore();
+  }
+});
+</script></body></html>`
+);
+for (let i = 1; i <= 9; i++) {
+  writeFileSync(
+    join(webRoot, 'docs', `sdoc${i}.pdf`),
+    Buffer.from(`%PDF-1.4
+% nbc scroll test ${i}
+`, 'latin1')
+  );
+}
+
 writeFileSync(
   join(webRoot, 'table.html'),
   `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>年度报表</title>
@@ -493,6 +544,135 @@ async function main() {
     new Set((tdl.data?.results || []).map((r) => r.filename)).size === 9,
     `去重后 ${new Set((tdl.data?.results || []).map((r) => r.filename)).size} 个`
   );
+
+  // --- 12. 无限滚动表格 --------------------------------------------------
+  console.log('\n[11] 无限滚动表格采集');
+  await sw.evaluate(
+    `chrome.tabs.create({url:'http://127.0.0.1:${WEB_PORT}/scroll-table.html'}).then(t=>t.id)`
+  );
+  await sleep(2000);
+  const scrollTabId = await sw.evaluate(
+    `chrome.tabs.query({url:'http://127.0.0.1:${WEB_PORT}/scroll-table.html'}).then(ts=>ts[ts.length-1].id)`
+  );
+  const scrollCall = (name, args = {}) =>
+    panel
+      .evaluate(
+        `chrome.runtime.sendMessage({type:'nbc:tool',name:${JSON.stringify(name)},` +
+          `args:${JSON.stringify(args)},tabId:${scrollTabId}}).then(r=>JSON.stringify(r))`
+      )
+      .then((s) => JSON.parse(s));
+
+  const sdocs = await scrollCall('table.docs', { exts: 'pdf', maxPages: 5, scroll: 'scrolled' });
+  check('无限滚动采集成功', sdocs.ok === true, sdocs.error || '');
+  check(
+    '滚动加载收集到多批数据',
+    (sdocs.data?.total || 0) >= 6,
+    `实际 ${sdocs.data?.total} 条，模式=${sdocs.data?.mode}`
+  );
+  check('识别为滚动模式', sdocs.data?.mode === 'scrolled', sdocs.data?.mode);
+
+  // --- 13. 划词 ----------------------------------------------------------
+  console.log('\n[12] 划词选择');
+  const listScroll = await httpJson('/json/list');
+  const scrollTarget = listScroll.find(
+    (t) => t.type === 'page' && t.url.includes('scroll-table.html')
+  );
+  const sc = connect(scrollTarget.webSocketDebuggerUrl);
+  await sc.ready;
+  await sc.send('Runtime.enable');
+  // 用真实鼠标拖拽建立选区 ——
+  // Runtime.evaluate 建立的选区只属于调试上下文，页面世界（MAIN world）读不到，
+  // 而真实选区正是靠 chrome.scripting.executeScript({world:'MAIN'}) 读取的。
+  const boxJson = await sc.evaluate(`(() => {
+    const cell = document.querySelector('#tbl tbody tr td');
+    if (!cell) return 'null';
+    const r = cell.getBoundingClientRect();
+    return JSON.stringify({
+      x1: r.left + 1, y1: r.top + r.height / 2 - 1,
+      x2: r.right - 1, y2: r.top + r.height / 2 + 1
+    });
+  })()`);
+  check('找到可划词元素', boxJson !== 'null', '');
+  if (boxJson !== 'null') {
+    const b = JSON.parse(boxJson);
+    await sc.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: b.x1, y: b.y1, button: 'left', clickCount: 1,
+    });
+    await sc.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: b.x2, y: b.y2, button: 'left', buttons: 1,
+    });
+    await sc.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: b.x2, y: b.y2, button: 'left', clickCount: 1,
+    });
+    await sleep(1200);
+
+    // 走真实路径：侧边栏 → 后台 → MAIN world 查询
+    const selAfter = await panel.evaluate(
+      `chrome.runtime.sendMessage({type:'nbc:tool',name:'page.selection',args:{tabId:${scrollTabId}}}).then(r=>JSON.stringify(r))`
+    );
+    const selParsed = JSON.parse(selAfter);
+    check('page.selection 读到选中的文字', (selParsed.data?.text || '').length > 0,
+      (selParsed.data?.text || '').slice(0, 40));
+    check('选区附带页面 URL', (selParsed.data?.url || '').includes('scroll-table.html'),
+      (selParsed.data?.url || '').slice(0, 60));
+    check('选区附带上下文文本', typeof selParsed.data?.context === 'string',
+      (selParsed.data?.context || '').slice(0, 40));
+  }
+  sc.ws.close();
+
+  // --- 14. 站点样式规则持久化 --------------------------------------------
+  console.log('\n[13] style.save —— 站点样式规则持久化');
+  await sw.evaluate(
+    `chrome.tabs.create({url:'http://127.0.0.1:${WEB_PORT}/testpage.html'}).then(t=>t.id)`
+  );
+  await sleep(2000);
+  const rulesTabId = await sw.evaluate(
+    `chrome.tabs.query({url:'http://127.0.0.1:${WEB_PORT}/testpage.html'}).then(ts=>ts[ts.length-1].id)`
+  );
+  const rulesCall = (name, args = {}) =>
+    panel
+      .evaluate(
+        `chrome.runtime.sendMessage({type:'nbc:tool',name:${JSON.stringify(name)},` +
+          `args:${JSON.stringify(args)},tabId:${rulesTabId}}).then(r=>JSON.stringify(r))`
+      )
+      .then((s) => JSON.parse(s));
+
+  await rulesCall('style.preset', { preset: 'dark' });
+  const saved = await rulesCall('style.save', {});
+  check('style.save 成功', saved.ok === true, saved.error || '');
+  check('按主机名保存', saved.data?.host === '127.0.0.1', saved.data?.host);
+  check('保存了规则条数', saved.data?.count === 1, `count=${saved.data?.count}`);
+
+  const listed = await rulesCall('style.rules', {});
+  check('style.rules 列出了站点',
+    listed.data?.sites?.some((s) => s.host === '127.0.0.1'),
+    JSON.stringify(listed.data?.sites?.map((s) => s.host)));
+
+  // 重新加载页面，验证规则自动生效
+  await sw.evaluate(`chrome.tabs.reload(${rulesTabId})`);
+  await sleep(3000);
+  const listRules = await httpJson('/json/list');
+  const rulesTarget = listRules.find(
+    (t) => t.type === 'page' && t.url.includes('testpage.html')
+  );
+  const rc = connect(rulesTarget.webSocketDebuggerUrl);
+  await rc.ready;
+  await rc.send('Runtime.enable');
+  await sleep(1500);
+  const autoApplied = await rc.evaluate(
+    `JSON.stringify({bg: getComputedStyle(document.body).backgroundColor, rules: document.querySelectorAll('#nbc-style-root style').length})`
+  );
+  const autoObj = JSON.parse(autoApplied);
+  check('重载后规则自动应用', autoObj.rules === 1, `规则数=${autoObj.rules}`);
+  check('重载后深色样式生效', autoObj.bg !== 'rgba(0, 0, 0, 0)', `bg=${autoObj.bg}`);
+
+  const cleared = await rulesCall('style.rules', { action: 'clear' });
+  check('style.rules 可清除规则', cleared.ok === true, cleared.error || '');
+  const afterClear = await rulesCall('style.rules', {});
+  check('清除后不再有该站点',
+    !afterClear.data?.sites?.some((s) => s.host === '127.0.0.1'),
+    JSON.stringify(afterClear.data?.sites?.map((s) => s.host)));
+  rc.ws.close();
 
   console.log('\n面板控制台日志：');
   console.log(panel.logs.slice(-15).join('\n') || '（无）');

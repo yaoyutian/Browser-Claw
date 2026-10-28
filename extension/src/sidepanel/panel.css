@@ -101,6 +101,48 @@ body {
 }
 .link-btn:hover { text-decoration: underline; }
 
+/* ---------- 划词选择条 ---------- */
+.selection-bar {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  padding: 7px 12px 8px;
+  border-left: 3px solid var(--accent);
+}
+
+.selection-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+.selection-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg-faint);
+  flex: 1;
+}
+
+.selection-text {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--fg);
+  max-height: 84px;
+  overflow-y: auto;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+.icon-btn.tiny {
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1;
+}
+
 /* ---------- 消息区 ---------- */
 .messages {
   flex: 1 1 auto;

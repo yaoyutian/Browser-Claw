@@ -133,6 +133,14 @@ export const TOOLS = [
     },
   },
   {
+    name: 'page.selection',
+    description:
+      '读取用户在当前页面上选中的文字（连同所在段落/章节的上下文）。' +
+      '当用户说「这段」「这些字」「我选中的」而没有贴出内容时，' +
+      '先用这个工具拿到选区文本再回答。',
+    parameters: { type: 'object', properties: { tabId: { type: 'integer' } } },
+  },
+  {
     name: 'page.eval',
     description:
       '在页面上下文中执行一段 JavaScript 表达式（自动包装为 async 函数，返回其结果）。' +
@@ -225,6 +233,30 @@ export const TOOLS = [
   },
 
   {
+    name: 'style.save',
+    description:
+      '把当前页面已注入的样式规则按域名保存下来，之后访问该网站会自动应用同样的改版。' +
+      '当用户说「以后这个网站都这样」「把这个改版保存下来」「记住这个站点的样式」时使用。' +
+      '必须先用 style.preset / style.apply 应用样式，再调用本工具。',
+    parameters: { type: 'object', properties: { tabId: { type: 'integer' } } },
+  },
+  {
+    name: 'style.rules',
+    description:
+      '管理已保存的站点样式规则。' +
+      '不带 action 时列出所有站点及其规则；action=clear 清除当前站点的全部规则；' +
+      'action=remove 配合 name 移除当前站点的某一条规则。' +
+      '当用户问「我在哪些网站改过样式」「把这个网站的改版撤销」时使用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'integer' },
+        action: { type: 'string', enum: ['list', 'clear', 'remove'] },
+        name: { type: 'string', description: '要移除的规则名称' },
+      },
+    },
+  },
+  {
     name: 'media.list',
     description:
       '列出页面中已加载的媒体与资源 URL（视频、音频、图片、文档，以及被 hook 到的 fetch/XHR 请求）。' +
@@ -286,16 +318,23 @@ export const TOOLS = [
           type: 'string',
           description: '要识别的扩展名，逗号分隔。默认 "pdf,doc,docx,xls,xlsx,ppt,pptx,csv,zip"',
         },
-        maxPages: { type: 'integer', description: '最多翻多少页，默认 10' },
-        waitMs: { type: 'integer', description: '每次翻页后等待加载的毫秒数，默认 1000' },
+        maxPages: { type: 'integer', description: '最多加载多少屏/页，默认 10' },
+        waitMs: { type: 'integer', description: '每次加载后等待的毫秒数，默认 1000' },
         tableIndex: { type: 'integer', description: '只处理第几个表格；不填则处理全部' },
+        scroll: {
+          type: 'string',
+          enum: ['auto', 'paged', 'scrolled'],
+          description:
+            '加载方式。auto（默认）自动判断：有分页控件就翻页，没有就滚动加载。' +
+            'scrolled 强制滚动加载（用于无限滚动页面）。',
+        },
       },
     },
   },
   {
     name: 'table.download',
     description:
-      '批量下载表格中的所有文档链接（自动翻页收集全部页）。' +
+      '批量下载表格中的所有文档链接（自动翻页/滚动加载收集全部内容）。' +
       '这是「把这个清单页上的 PDF 都下载下来」这类需求的正确工具。' +
       '文件会用「行标签_列标题.pdf」的方式命名，避免下载出一堆无意义的文件名。' +
       '下载前会返回每个文件的来源行/列，方便向用户确认。',
@@ -307,9 +346,14 @@ export const TOOLS = [
           type: 'string',
           description: '要下载的文档扩展名，逗号分隔。默认 "pdf,doc,docx,xls,xlsx,ppt,pptx,csv,zip"',
         },
-        maxPages: { type: 'integer', description: '最多翻多少页，默认 10' },
-        waitMs: { type: 'integer', description: '每次翻页后等待加载的毫秒数，默认 1000' },
+        maxPages: { type: 'integer', description: '最多加载多少屏/页，默认 10' },
+        waitMs: { type: 'integer', description: '每次加载后等待的毫秒数，默认 1000' },
         tableIndex: { type: 'integer', description: '只处理第几个表格' },
+        scroll: {
+          type: 'string',
+          enum: ['auto', 'paged', 'scrolled'],
+          description: 'auto 默认自动判断；scrolled 强制滚动加载（无限滚动页面）',
+        },
         concurrency: { type: 'integer', description: '并发下载数，默认 3' },
         referer: { type: 'string', description: '可选的 Referer 头' },
       },

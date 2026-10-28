@@ -34,6 +34,8 @@
 | ⬇️ **批量下载** | `media.list` `media.download` | 找出页面里的音视频/文档，带登录态 Cookie 与 Referer 批量下载；HLS/DASH 流交给 ffmpeg 合并 |
 | 📄 **导出文档** | `doc.export` | 直接生成 Markdown / Word(.docx) / HTML / TXT |
 | 🖱️ **网页交互** | `page.click` `page.fill` `page.scroll` `page.highlight` | 点击、填表、滚动；操作前可高亮目标让你确认 |
+| ✂️ **划词提问** | `page.selection` | 选中网页上的文字，侧边栏直接出现「就此提问」 |
+| 💾 **记住站点改版** | `style.save` `style.rules` | 把某网站的改版规则存下来，下次访问自动生效 |
 | 🗂️ **标签页管理** | `tab.*` `nav.back` | 列出、打开、切换、关闭标签页 |
 | 🔌 **对外提供能力** | MCP server | 让 Claude Code / Cursor / 任何 MCP 客户端驱动你的**真实浏览器** |
 
@@ -98,6 +100,20 @@ NBC_PORT=8788 node companion/server.mjs   # 换端口（扩展会自动发现 87
 
 配置会持久化到 `~/.netbrowserclaw/config.json`（不在仓库里），companion 重启后依然有效。
 
+#### 划词提问
+
+在网页上**选中一段文字**，侧边栏顶部会出现「已选中 / 就此提问 →」，点一下就能就这段话继续聊。
+不用复制粘贴。
+
+> 划词能工作的原理：内容脚本跑在隔离世界，那里读不到页面的真实选区，
+> 所以扩展会在页面世界（MAIN world）注入一个探针来读取选区，再把结果传回侧边栏。
+
+#### 记住站点的改版
+
+给某个网站改完版后说「**以后这个网站都这样**」，扩展会按域名把规则存下来，
+下次访问该站自动应用（深色模式、隐藏广告、调过的字号都会保留）。
+用 `style.rules` 可以查看/清除已保存的站点。
+
 #### 表格批量下载
 
 报表类页面上「每一行每一列都藏着一个 PDF 链接」时，直接说：
@@ -161,7 +177,7 @@ docs/               可行性评估 · 架构设计 · 开源借鉴 · 路线图
 ```bash
 node scripts/make-icons.mjs     # 重新生成图标
 node scripts/check-project.mjs  # 项目结构自检（manifest 引用 + 工具/handler 一致性）
-node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 51 项
+node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 66 项
 node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS）— 23 项
 ```
 
@@ -170,7 +186,7 @@ node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS
 DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成可播放的视频），
 而不只是检查返回值。
 
-当前状态：**74/74 通过**。
+当前状态：**89/89 通过**。
 
 新增一个工具只要三步：
 
@@ -187,9 +203,9 @@ DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成�
 - **DRM 加密内容（Netflix / 会员视频）无法下载** —— 这是加密设计，不是权限问题。
   本项目只处理你自身有权访问的内容。
 - **跨域 iframe 内容读不到** —— 需另开标签页。
-- **表格翻页依赖页面有可识别的「下一页」控件** —— 覆盖了常见分页写法
-  （`rel=next`、`aria-label`、`.next`、`.pagination`、文本「下一页/next/›/»」等）。
-  纯前端渲染且无分页控件的页面，需要用 `page.scroll` 滚动加载后再采集。
+- **表格采集支持两种页面形态** —— 有「下一页」控件的传统分页，以及没有分页控件的
+  无限滚动（自动滚到底部触发懒加载）。两种都会自动识别，必要时可用 `scroll` 参数强制指定。
+  极少数既无分页控件、也不响应滚动的页面，才需要手动 `page.scroll` 后再采集。
 - **DOCX 样式有限** —— 支持标题/段落/列表/引用/代码块/行内格式，
   不支持表格、图片、页眉页脚。复杂排版请用 companion + pandoc。
 - **扩展需要 `<all_urls>` 权限** —— 这是「在任意网站工作」的必要代价。

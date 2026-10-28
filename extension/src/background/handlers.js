@@ -7,6 +7,13 @@
 import { ToolError, safeName, siteName, stamp, truncate, formatBytes, mimeOf, extOf } from '../shared/util.js';
 import { markdownToDocx } from '../shared/docx.js';
 import { findCompanion, companionFetch } from '../shared/companion.js';
+import {
+  saveSiteRules,
+  getSiteRules,
+  listSiteRules,
+  clearSiteRules,
+  removeSiteRule,
+} from './site-rules.js';
 
 /** 判断是否为 HLS/DASH 播放清单（需要 ffmpeg 合并，扩展无法直接下载）。 */
 function isStreamManifest(url) {
@@ -395,6 +402,7 @@ async function collectTableDocs(args) {
       maxPages: args.maxPages,
       waitMs: args.waitMs,
       tableIndex: args.tableIndex,
+      scroll: args.scroll,
     },
     args.tabId
   );
@@ -540,6 +548,38 @@ export const handlers = {
     return captureScreenshot(args.tabId);
   },
 
+  async 'page.selection'(args) {
+    // 选区只存在于 MAIN world（页面世界）——
+    // 隔离世界里有独立的 selection 状态，读不到用户真正选中的内容（实测返回 null）。
+    // 直接在 MAIN world 查询，不依赖任何消息通道，最可靠。
+    const tab = await getTab(args.tabId);
+    if (!tab?.id) throw new ToolError('找不到目标标签页');
+    if (!/^https?:|^file:/.test(tab.url || '')) {
+      throw new ToolError('当前页面不支持读取选区');
+    }
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      func: () => {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+        const text = sel.toString().replace(/\s+/g, ' ').trim();
+        if (!text) return null;
+        let context = '';
+        try {
+          const node = sel.anchorNode;
+          const el = node?.nodeType === 1 ? node : node?.parentElement;
+          context = (el?.closest?.('article, main, section, p, li, h1, h2, h3')?.textContent || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 500);
+        } catch { /* ignore */ }
+        return { text: text.slice(0, 4000), context, url: location.href, title: document.title };
+      },
+    });
+    return results?.[0]?.result || null;
+  },
+
   async 'style.apply'(args) {
     return contentCall(
       {
@@ -561,6 +601,37 @@ export const handlers = {
 
   async 'style.list'(_args, ctx) {
     return contentCall({ type: 'nbc:style:list' }, ctx.tabId);
+  },
+
+  async 'style.save'(args) {
+    // 把当前页面已注入的样式规则按域名保存下来，之后访问该站自动生效。
+    const rules = await contentCall({ type: 'nbc:style:list' }, args.tabId);
+    if (!rules?.length) {
+      throw new ToolError('当前页面没有已注入的样式规则', '先应用样式再保存');
+    }
+    const tab = await getTab(args.tabId);
+    const saved = await saveSiteRules(tab.url, rules);
+    return {
+      ok: true,
+      host: saved.host,
+      count: saved.count,
+      names: rules.map((r) => r.name),
+      hint: `以后访问 ${saved.host} 会自动应用这 ${saved.count} 条规则`,
+    };
+  },
+
+  async 'style.rules'(args) {
+    if (args.action === 'clear') {
+      const tab = await getTab(args.tabId);
+      const r = await clearSiteRules(tab.url);
+      return { ok: true, ...r };
+    }
+    if (args.action === 'remove') {
+      const tab = await getTab(args.tabId);
+      const r = await removeSiteRule(tab.url, args.name);
+      return { ok: true, ...r };
+    }
+    return { ok: true, sites: await listSiteRules() };
   },
 
   async 'style.remove'(args) {

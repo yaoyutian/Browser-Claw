@@ -218,5 +218,17 @@ aside, nav, .sidebar, .ad, .advertisement { display: none !important; }
     remove,
     scopeCss,
     upsert,
+    /** 应用一组持久化规则（按域名保存的那些）。 */
+    applyRules: (rules) => {
+      const applied = [];
+      for (const r of rules || []) {
+        if (!r?.css) continue;
+        try {
+          upsert(r.name || `saved-${applied.length}`, r.css);
+          applied.push(r.name);
+        } catch { /* 忽略单条失败 */ }
+      }
+      return applied;
+    },
   };
 })();
