@@ -8,8 +8,11 @@
 // 它会真实地：加载扩展 → 打开测试页 → 调工具 → 检查 DOM/文件系统结果。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, readFileSync,
+  readdirSync, statSync,
+} from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -141,6 +144,29 @@ for (let i = 1; i <= 9; i++) {
 `, 'latin1')
   );
 }
+
+// --- 带外链资源的测试页：验证归档的内联能力 ---
+writeFileSync(
+  join(webRoot, 'style.css'),
+  'body { color: #123456; font-family: serif; }'
+);
+writeFileSync(
+  join(webRoot, 'pic.png'),
+  Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+);
+writeFileSync(
+  join(webRoot, 'assets.html'),
+  `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>带资源页面</title>
+<link rel="stylesheet" href="style.css"></head><body>
+<h1>带外链资源的页面</h1>
+<p>这个页面引用了外部 CSS 与图片，用于验证归档时的资源内联。</p>
+<img src="pic.png" alt="测试图片" width="1" height="1">
+<p><a href="https://example.com/original">外部链接</a></p>
+</body></html>`
+);
 
 writeFileSync(
   join(webRoot, 'table.html'),
@@ -673,6 +699,177 @@ async function main() {
     !afterClear.data?.sites?.some((s) => s.host === '127.0.0.1'),
     JSON.stringify(afterClear.data?.sites?.map((s) => s.host)));
   rc.ws.close();
+
+
+  // --- 15. 摘录导出为 Markdown --------------------------------------------
+  console.log('\n[14] clip.export —— 摘录导出为 Markdown');
+  const artTabId = await sw.evaluate(
+    `chrome.tabs.create({url:'http://127.0.0.1:${WEB_PORT}/testpage.html'}).then(t=>t.id)`
+  );
+  await sleep(2000);
+  const listClip = await httpJson('/json/list');
+  const artTarget = listClip.find(
+    (t) => t.type === 'page' && t.url.includes('testpage.html')
+  );
+  const artConn = connect(artTarget.webSocketDebuggerUrl);
+  await artConn.ready;
+  await artConn.send('Runtime.enable');
+
+  const clipBox = await artConn.evaluate(`(() => {
+    const p = document.querySelector('.article-body p');
+    if (!p) return 'null';
+    const r = p.getBoundingClientRect();
+    return JSON.stringify({
+      x1: r.left + 1, y1: r.top + r.height / 2 - 1,
+      x2: r.right - 1, y2: r.top + r.height / 2 + 1
+    });
+  })()`);
+  check('找到可摘录的段落', clipBox !== 'null', '');
+  if (clipBox !== 'null') {
+    const b = JSON.parse(clipBox);
+    await artConn.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: b.x1, y: b.y1, button: 'left', clickCount: 1,
+    });
+    await artConn.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: b.x2, y: b.y2, button: 'left', buttons: 1,
+    });
+    await artConn.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: b.x2, y: b.y2, button: 'left', clickCount: 1,
+    });
+    await sleep(1200);
+
+    const clip = await panel.evaluate(`chrome.runtime.sendMessage({
+      type:'nbc:tool', name:'clip.export',
+      args:{ scope:'selection', note:'测试附注', tabId:${artTabId} }
+    }).then(r=>JSON.stringify(r))`).then((s) => JSON.parse(s));
+    check('clip.export 成功', clip.ok === true, clip.error || '');
+    check('生成了 .md 文件', clip.data?.filename?.endsWith('.md'), clip.data?.filename);
+    check('内容含 YAML frontmatter', (clip.data?.preview || '').startsWith('---'),
+      (clip.data?.preview || '').slice(0, 30));
+    check('frontmatter 含来源链接', (clip.data?.preview || '').includes('source:'), '');
+    check('frontmatter 含标题', (clip.data?.preview || '').includes('title:'), '');
+    check('内容含选中的文字', (clip.data?.preview || '').includes('Manifest V3'), '');
+    check('内容含附注', (clip.data?.preview || '').includes('测试附注'), '');
+    check('内容含来源 URL', (clip.data?.preview || '').includes('testpage.html'), '');
+  }
+  artConn.ws.close();
+
+  const clipArticle = await panel.evaluate(`chrome.runtime.sendMessage({
+    type:'nbc:tool', name:'clip.export',
+    args:{ scope:'article', tabId:${artTabId} }
+  }).then(r=>JSON.stringify(r))`).then((s) => JSON.parse(s));
+  check('整篇摘录成功', clipArticle.ok === true, clipArticle.error || '');
+  check('整篇含完整正文', (clipArticle.data?.bytes || 0) > 800,
+    `${clipArticle.data?.bytes} 字节`);
+  check('整篇含文章标题', (clipArticle.data?.preview || '').includes('Manifest V3'),
+    (clipArticle.data?.preview || '').slice(0, 60));
+
+  // --- 16. 整页归档为单文件 HTML ------------------------------------------
+  console.log('\n[15] page.archive —— 整页归档为单文件 HTML');
+  const archived = await panel.evaluate(`chrome.runtime.sendMessage({
+    type:'nbc:tool', name:'page.archive', args:{ tabId:${artTabId} }
+  }).then(r=>JSON.stringify(r))`).then((s) => JSON.parse(s));
+  check('page.archive 成功', archived.ok === true, archived.error || '');
+  check('生成 .html 文件', archived.data?.filename?.endsWith('.html'), archived.data?.filename);
+  check('文件非空', (archived.data?.bytes || 0) > 1000, `${archived.data?.bytes} 字节`);
+  check('记录了来源地址',
+    (archived.data?.meta?.url || '').includes('testpage.html'), archived.data?.meta?.url);
+  check('记录了归档时间', Boolean(archived.data?.meta?.archivedAt), '');
+  check('统计了内联资源', typeof archived.data?.stats?.cssTotal === 'number',
+    JSON.stringify(archived.data?.stats));
+
+  // 带外链资源的页面：验证 CSS 与图片真的被内联成 data: URI
+  await sw.evaluate(
+    `chrome.tabs.create({url:'http://127.0.0.1:${WEB_PORT}/assets.html'}).then(t=>t.id)`
+  );
+  await sleep(2000);
+  const assetsTabId = await sw.evaluate(
+    `chrome.tabs.query({url:'http://127.0.0.1:${WEB_PORT}/assets.html'}).then(ts=>ts[0].id)`
+  );
+  const assetsArchive = await panel.evaluate(`chrome.runtime.sendMessage({
+    type:'nbc:tool', name:'page.archive', args:{ tabId:${assetsTabId} }
+  }).then(r=>JSON.stringify(r))`).then((s) => JSON.parse(s));
+  check('带资源页面归档成功', assetsArchive.ok === true, assetsArchive.error || '');
+  check('发现外部样式表', (assetsArchive.data?.stats?.cssTotal || 0) >= 1,
+    `cssTotal=${assetsArchive.data?.stats?.cssTotal}`);
+  check('发现外部图片', (assetsArchive.data?.stats?.imagesTotal || 0) >= 1,
+    `imagesTotal=${assetsArchive.data?.stats?.imagesTotal}`);
+  check('样式表已内联', (assetsArchive.data?.stats?.cssInlined || 0) >= 1,
+    `cssInlined=${assetsArchive.data?.stats?.cssInlined}`);
+  check('图片已内联', (assetsArchive.data?.stats?.imagesInlined || 0) >= 1,
+    `imagesInlined=${assetsArchive.data?.stats?.imagesInlined}`);
+
+  // 读回归档产物，检查内容真的自包含（data: URI、脚本已移除、来源信息在）
+  // finalPath 在部分平台上是相对路径，且同名文件会被浏览器加 " (N)" 后缀，
+  // 所以直接到下载目录里找最新的「带资源页面」归档文件。
+  const dlDir = join(homedir(), 'Downloads');
+  const candidates = readdirSync(dlDir)
+    .filter((f) => f.includes('archive-') && f.includes('带资源页面') && f.endsWith('.html'))
+    .map((f) => join(dlDir, f))
+    .map((p) => ({ p, t: statSync(p).mtimeMs }))
+    .sort((a, b) => b.t - a.t);
+  const archiveFile = candidates[0]?.p || '';
+  check('归档文件已落盘', Boolean(archiveFile), archiveFile);
+  if (archiveFile) {
+    const html = readFileSync(archiveFile, 'utf8');
+    check('归档内含 data: URI 的图片', html.includes('data:image/'), '');
+    check('归档内含内联的样式', html.includes('#123456'), '');
+    check('归档已移除脚本', !html.includes('<script'), '');
+    check('归档含来源信息', html.includes('网页归档'), '');
+    check('归档含原始链接', html.includes('原链接'), '');
+    check('归档内容对应本次页面', html.includes('带外链资源的页面'),
+      html.slice(0, 200).replace(/\s+/g, ' '));
+  }
+
+  // --- 17. 下载队列与进度 --------------------------------------------------
+  console.log('\n[16] download.queue —— 下载队列');
+  const qClear = await call('download.queue', { action: 'clear' });
+  check('队列可清空', qClear.ok === true, qClear.error || '');
+
+  const queued = await call('media.download', {
+    urls: [
+      { url: `http://127.0.0.1:${WEB_PORT}/guide.pdf`, filename: 'nbc-q1.pdf' },
+      { url: `http://127.0.0.1:${WEB_PORT}/demo.mp4`, filename: 'nbc-q2.mp4' },
+    ],
+    queue: true,
+  });
+  check('加入队列成功', queued.ok === true, queued.error || '');
+  check('返回队列模式', queued.data?.mode === 'queue', queued.data?.mode);
+  check('报告入队数量', queued.data?.queued === 2, `queued=${queued.data?.queued}`);
+
+  await sleep(3000);
+  const qStatus = await call('download.queue', { action: 'status' });
+  check('队列状态可查询', qStatus.ok === true, qStatus.error || '');
+  check('队列含 2 个任务', qStatus.data?.queue?.total === 2,
+    `total=${qStatus.data?.queue?.total}`);
+  check('有任务已完成', (qStatus.data?.queue?.done || 0) >= 1,
+    `done=${qStatus.data?.queue?.done} failed=${qStatus.data?.queue?.failed}`);
+
+  // --- 18. 对话导出为 Markdown --------------------------------------------
+  console.log('\n[17] chat.export —— 对话导出为 Markdown');
+  const synced = await panel.evaluate(`chrome.runtime.sendMessage({
+    type: 'nbc:chat:sync',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: '帮我总结这个页面' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '这是页面摘要。' },
+        { type: 'tool_use', id: 't1', name: 'page.read', input: { tabId: 1 } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1',
+        content: '{"title":"测试文章","markdown":"# 正文"}' }] }
+    ],
+    meta: { model: 'gpt-4o-mini', provider: 'OpenAI' }
+  }).then(r=>JSON.stringify(r))`);
+  check('对话历史同步成功', JSON.parse(synced).ok === true, synced);
+
+  const chat = await call('chat.export', { title: '测试对话' });
+  check('chat.export 成功', chat.ok === true, chat.error || '');
+  check('生成 .md 文件', chat.data?.filename?.endsWith('.md'), chat.data?.filename);
+  check('含 YAML frontmatter', (chat.data?.preview || '').startsWith('---'), '');
+  check('含标题', (chat.data?.preview || '').includes('测试对话'), '');
+  check('含用户消息', (chat.data?.preview || '').includes('帮我总结这个页面'), '');
+  check('含助手消息', (chat.data?.preview || '').includes('这是页面摘要'), '');
+  check('含工具调用记录', (chat.data?.preview || '').includes('page.read'), '');
+  check('含工具结果', (chat.data?.preview || '').includes('测试文章'), '');
+  check('记录了消息条数', chat.data?.count === 3, `count=${chat.data?.count}`);
 
   console.log('\n面板控制台日志：');
   console.log(panel.logs.slice(-15).join('\n') || '（无）');

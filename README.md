@@ -22,6 +22,23 @@
 
 ![侧边栏界面](docs/screenshot-panel.png)
 
+<details>
+<summary>更多界面截图</summary>
+
+划词提问：
+
+![划词](docs/screenshot-selection.png)
+
+下载队列：
+
+![队列](docs/screenshot-queue.png)
+
+本地工具设置：
+
+![设置](docs/screenshot-settings.png)
+
+</details>
+
 ---
 
 ## 它能做什么
@@ -36,6 +53,10 @@
 | 🖱️ **网页交互** | `page.click` `page.fill` `page.scroll` `page.highlight` | 点击、填表、滚动；操作前可高亮目标让你确认 |
 | ✂️ **划词提问** | `page.selection` | 选中网页上的文字，侧边栏直接出现「就此提问」 |
 | 💾 **记住站点改版** | `style.save` `style.rules` | 把某网站的改版规则存下来，下次访问自动生效 |
+| 📑 **摘录为 Markdown** | `clip.export` | 选区或整篇存成带 YAML frontmatter 的 .md，可直接进 Obsidian |
+| 🗄️ **整页归档** | `page.archive` | 打包成自包含的单文件 HTML（CSS/图片全内联），离线双击即开 |
+| 📥 **下载队列** | `download.queue` | 大批量下载入队后台跑，侧边栏实时看进度，可暂停/取消 |
+| 💬 **导出对话** | `chat.export` | 整段对话（含工具调用记录）存成 Markdown |
 | 🗂️ **标签页管理** | `tab.*` `nav.back` | 列出、打开、切换、关闭标签页 |
 | 🔌 **对外提供能力** | MCP server | 让 Claude Code / Cursor / 任何 MCP 客户端驱动你的**真实浏览器** |
 
@@ -114,6 +135,56 @@ NBC_PORT=8788 node companion/server.mjs   # 换端口（扩展会自动发现 87
 下次访问该站自动应用（深色模式、隐藏广告、调过的字号都会保留）。
 用 `style.rules` 可以查看/清除已保存的站点。
 
+#### 摘录为 Markdown
+
+选中一段文字后说「**摘录这段**」，或直接用「就地提问」旁边的摘录功能。
+导出的是带 YAML frontmatter 的 Markdown：
+
+```markdown
+---
+title: "深入理解浏览器扩展 Manifest V3"
+source: "https://example.com/article"
+author: "某某"
+published: "2026-01-15"
+site: "example.com"
+created: "2026-10-28T02:31:57Z"
+tags: [clippings]
+---
+
+# 深入理解浏览器扩展 Manifest V3
+
+> 选中的那段话
+
+**上下文**
+
+所在段落或章节的原文
+
+**笔记**
+
+你自己加的批注
+```
+
+存进 Obsidian / Logseq 直接就是一篇带元信息的笔记。
+
+#### 整页归档
+
+说「**把这个页面存下来**」，扩展会打包成一个自包含的 HTML：
+外部 CSS 内联成 `<style>`、图片转成 data: URI、脚本移除、iframe 换成占位说明、
+每个外链旁标注原地址。离线双击打开，版式基本保持原样，顶部有一行来源与归档时间。
+
+#### 下载队列
+
+文件很多时（几十个以上），扩展会把它加进队列后台下载，不阻塞对话。
+侧边栏顶部会出现队列面板，实时显示完成数、失败数与单个文件的进度条，可暂停/继续/取消。
+
+队列状态存在 `chrome.storage.session` —— Service Worker 被回收后任务能接着跑，
+浏览器关闭即清空。
+
+#### 导出对话
+
+点顶栏的 ⇩ 按钮，或说「**导出对话**」，整段对话（含每次工具调用的入参与结果）
+会存成 Markdown，适合存档或二次整理。
+
 #### 表格批量下载
 
 报表类页面上「每一行每一列都藏着一个 PDF 链接」时，直接说：
@@ -177,7 +248,7 @@ docs/               可行性评估 · 架构设计 · 开源借鉴 · 路线图
 ```bash
 node scripts/make-icons.mjs     # 重新生成图标
 node scripts/check-project.mjs  # 项目结构自检（manifest 引用 + 工具/handler 一致性）
-node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 66 项
+node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 113 项
 node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS）— 23 项
 ```
 
@@ -186,7 +257,7 @@ node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS
 DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成可播放的视频），
 而不只是检查返回值。
 
-当前状态：**89/89 通过**。
+当前状态：**136/136 通过**。
 
 新增一个工具只要三步：
 

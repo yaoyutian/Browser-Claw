@@ -297,6 +297,12 @@ export const TOOLS = [
         },
         concurrency: { type: 'integer', description: '并发数，默认 3' },
         referer: { type: 'string', description: '可选的 Referer 头' },
+        queue: {
+          type: 'boolean',
+          description:
+            'true 时加入下载队列后台执行，立即返回，不阻塞对话。' +
+            '文件很多（几十个以上）时建议开启，可用 download.queue 查看进度。',
+        },
       },
       required: ['urls'],
     },
@@ -360,6 +366,80 @@ export const TOOLS = [
     },
   },
 
+  {
+    name: 'page.archive',
+    description:
+      '把整个当前页面归档成一个自包含的 HTML 文件（CSS/图片会内联成 data: URI，' +
+      '离线双击即可打开，保留原始排版），文件顶部会附上来源与归档时间。' +
+      '当用户说「把这个页面存下来」「离线保存这个网页」「归档」时使用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'integer' },
+        inlineImages: { type: 'boolean', description: '是否内联图片，默认 true' },
+        inlineCss: { type: 'boolean', description: '是否内联外部样式表，默认 true' },
+        includeIframes: { type: 'boolean', description: '是否保留 iframe 内容，默认 false（换成占位说明）' },
+        keepDynamic: { type: 'boolean', description: '是否保留脚本，默认 false' },
+      },
+    },
+  },
+  {
+    name: 'clip.export',
+    description:
+      '把网页上的选中内容（或整篇文章）摘录保存为 Markdown 文件，' +
+      '文件带 YAML frontmatter（标题、来源链接、作者、发布时间、站点、标签、摘录时间），' +
+      '可直接放进 Obsidian / Logseq / 静态博客。' +
+      '当用户说「摘录这段」「存成 markdown」「收藏一下」时使用。' +
+      '默认导出选区；用户想保存整篇时用 scope="article"。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'integer' },
+        scope: {
+          type: 'string',
+          enum: ['selection', 'article'],
+          description: 'selection（默认）导出选中内容；article 导出整篇正文',
+        },
+        format: {
+          type: 'string',
+          enum: ['md', 'txt', 'article'],
+          description: 'md（默认）带 frontmatter 的 Markdown；txt 纯文本；article 整篇 Markdown',
+        },
+        note: { type: 'string', description: '可选的附注，会写进 Markdown 的「笔记」段' },
+      },
+    },
+  },
+  {
+    name: 'chat.export',
+    description:
+      '把当前对话导出为 Markdown 文件（含 YAML frontmatter、完整的问答内容与工具调用记录）。' +
+      '当用户说「导出对话」「保存聊天记录」「把这段对话存下来」时使用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        format: { type: 'string', enum: ['md', 'txt'], description: '默认 md' },
+        title: { type: 'string', description: '导出文件的标题' },
+      },
+    },
+  },
+  {
+    name: 'download.queue',
+    description:
+      '查看与管理下载队列。' +
+      'action=status（默认）返回队列状态与每个文件的进度；' +
+      'pause / resume 暂停或继续；cancel 取消全部；clear 清空记录；remove 按 id 移除单个。' +
+      '当用户问「下载到哪了」「还有几个没下」时使用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['status', 'clear', 'cancel', 'pause', 'resume', 'remove'],
+        },
+        id: { type: 'string', description: 'remove 时指定任务 id' },
+      },
+    },
+  },
   {
     name: 'doc.export',
     description:

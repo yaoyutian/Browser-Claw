@@ -51,6 +51,7 @@
         "src/content/media.js",
         "src/content/extractor.js",
         "src/content/style-agent.js",
+        "src/content/archiver.js",
         "src/content/content.js"
       ]
     }

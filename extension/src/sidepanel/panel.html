@@ -13,6 +13,7 @@
       <span class="name">NetBrowserClaw</span>
     </div>
     <div class="topbar-actions">
+      <button id="btn-export-chat" class="icon-btn" title="导出对话为 Markdown">⇩</button>
       <button id="btn-context" class="icon-btn" title="插入当前页面上下文">⟨页⟩</button>
       <button id="btn-clear" class="icon-btn" title="清空对话">✕</button>
       <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
@@ -33,6 +34,20 @@
     </div>
     <div id="selection-text" class="selection-text"></div>
   </div>
+
+  <!-- 下载队列面板 -->
+  <section id="queue-panel" class="queue-panel" hidden>
+    <div class="queue-head">
+      <span class="queue-title">下载队列</span>
+      <span id="queue-summary" class="queue-summary"></span>
+      <div class="queue-actions">
+        <button id="btn-queue-toggle" class="link-btn" title="暂停/继续">暂停</button>
+        <button id="btn-queue-clear" class="link-btn" title="清空记录">清空</button>
+        <button id="btn-queue-close" class="icon-btn tiny" title="收起">✕</button>
+      </div>
+    </div>
+    <div id="queue-list" class="queue-list"></div>
+  </section>
 
   <main id="messages" class="messages"></main>
 

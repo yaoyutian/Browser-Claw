@@ -623,6 +623,60 @@
   window.addEventListener('pointerdown', ensureProbeOnce, true);
   window.addEventListener('keydown', ensureProbeOnce, true);
 
+  /**
+   * 采集页面元信息（作者 / 发布时间 / 站点名 / canonical URL）。
+   * 摘录导出时放进 YAML frontmatter。
+   */
+  function collectMeta() {
+    const get = (sel, attr = 'content') =>
+      document.querySelector(sel)?.getAttribute(attr)?.trim() || '';
+
+    const meta = {
+      title: document.title,
+      url: location.href,
+      canonical:
+        document.querySelector('link[rel=canonical]')?.href || location.href,
+      description: get('meta[name=description]'),
+      author:
+        get('meta[name=author]') ||
+        get('meta[property="article:author"]') ||
+        get('meta[property="og:article:author"]') ||
+        // JSON-LD 里的作者
+        (() => {
+          try {
+            for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+              const data = JSON.parse(s.textContent);
+              const nodes = Array.isArray(data) ? data : [data];
+              for (const n of nodes) {
+                const a = n?.author;
+                if (!a) continue;
+                if (typeof a === 'string') return a;
+                if (Array.isArray(a) && a[0]?.name) return a[0].name;
+                if (a.name) return a.name;
+              }
+            }
+          } catch { /* ignore */ }
+          return '';
+        })(),
+      published:
+        get('meta[property="article:published_time"]') ||
+        get('meta[name=pubdate]') ||
+        get('meta[name=publishdate]') ||
+        get('meta[itemprop=datePublished]') ||
+        // <time datetime="...">
+        document.querySelector('time[datetime]')?.getAttribute('datetime') ||
+        '',
+      modified:
+        get('meta[property="article:modified_time"]') ||
+        get('meta[name=lastmod]') ||
+        '',
+      siteName:
+        get('meta[property="og:site_name"]') || location.hostname.replace(/^www\./, ''),
+      lang: document.documentElement.lang || '',
+    };
+    return meta;
+  }
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
@@ -693,6 +747,15 @@
           case 'nbc:selection:current':
             // 隔离世界读不到真实选区，返回最近一次由 MAIN world 探针上报的值。
             sendResponse({ ok: true, data: getSelectionInfo() });
+            break;
+          case 'nbc:meta':
+            sendResponse({ ok: true, data: collectMeta() });
+            break;
+          case 'nbc:archive':
+            sendResponse({
+              ok: true,
+              data: await call(window.__nbcArchiver.archive, msg.options),
+            });
             break;
           case 'nbc:eval':
             // 实际执行在后台的 MAIN world 中完成（扩展 CSP 禁止 unsafe-eval）。

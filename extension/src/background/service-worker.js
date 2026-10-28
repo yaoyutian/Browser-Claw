@@ -14,6 +14,8 @@
 import { handlers } from './handlers.js';
 import { startBridge } from './bridge.js';
 import { registerAutoApply } from './site-rules.js';
+import { registerDownloadEvents, recover } from './download-queue.js';
+import { setHistory as setChatHistory } from './chat-history.js';
 
 // ---------------------------------------------------------------------------
 // 侧边栏
@@ -85,6 +87,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
 
+    // 侧边栏把对话历史同步给后台，供 chat.export 使用。
+    if (msg?.type === 'nbc:chat:sync') {
+      const r = await setChatHistory(msg.messages, msg.meta);
+      sendResponse({ ok: true, ...r });
+      return;
+    }
+
     if (msg?.type !== 'nbc:tool') {
       sendResponse({ ok: false, error: '未知消息类型' });
       return;
@@ -126,3 +135,7 @@ startBridge();
 
 // 站点样式规则：页面导航后自动应用已保存的规则
 registerAutoApply();
+
+// 下载队列：把浏览器的下载进度写回队列；SW 重启后恢复未完成的任务
+registerDownloadEvents();
+recover();

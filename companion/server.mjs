@@ -302,6 +302,23 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // --- 保存文本内容到磁盘 ------------------------------------------------
+    // 归档大页面时用（扩展里 base64 会占大量内存）
+    if (url.pathname === '/save' && req.method === 'POST') {
+      const { filename, content } = await readJson(req);
+      if (!filename || typeof content !== 'string') {
+        sendJson(res, 400, { error: '缺少 filename 或 content' });
+        return;
+      }
+      mkdirSync(toolConfig.downloadDir, { recursive: true });
+      // 去掉路径分隔符，避免写到目录外
+      const safeName = String(filename).replace(/[\/:*?"<>|]+/g, '_').slice(0, 180);
+      const outPath = pathJoin(toolConfig.downloadDir, safeName);
+      writeFileSync(outPath, content, 'utf8');
+      sendJson(res, 200, { ok: true, path: outPath, bytes: Buffer.byteLength(content, 'utf8') });
+      return;
+    }
+
     // --- 本地工具配置 -----------------------------------------------------
     if (url.pathname === '/config' && req.method === 'GET') {
       sendJson(res, 200, {
@@ -670,6 +687,50 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: 'browser_clip_export',
+    description:
+      '把当前页面选中的内容（或整篇文章）摘录保存为带 YAML frontmatter 的 Markdown 文件。' +
+      '适用于把网页内容收集进 Obsidian / Logseq 一类的笔记系统。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        scope: { type: 'string', enum: ['selection', 'article'], description: '默认 selection' },
+        format: { type: 'string', enum: ['md', 'txt', 'article'] },
+        note: { type: 'string', description: '可选附注' },
+      },
+    },
+  },
+  {
+    name: 'browser_archive_page',
+    description:
+      '把整个页面归档成一个自包含的 HTML 文件（CSS/图片内联），离线双击即可打开。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        inlineImages: { type: 'boolean' },
+        inlineCss: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'browser_download_queue',
+    description: '查看与管理下载队列（status / pause / resume / cancel / clear）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['status', 'pause', 'resume', 'cancel', 'clear'] },
+      },
+    },
+  },
+  {
+    name: 'browser_export_chat',
+    description: '把当前对话导出为 Markdown 文件。',
+    inputSchema: {
+      type: 'object',
+      properties: { format: { type: 'string', enum: ['md', 'txt'] } },
+    },
+  },
+  {
     name: 'browser_list_tabs',
     description: '列出所有打开的网页标签页。',
     inputSchema: { type: 'object', properties: {} },
@@ -704,6 +765,10 @@ const MCP_TO_DISPATCH = {
   browser_read_selection: (a) => ['page.selection', { tabId: a.tabId }],
   browser_save_site_style: (a) => ['style.save', { tabId: a.tabId }],
   browser_list_site_styles: (a) => ['style.rules', { action: a.action, tabId: a.tabId }],
+  browser_clip_export: (a) => ['clip.export', { scope: a.scope, format: a.format, note: a.note }],
+  browser_archive_page: (a) => ['page.archive', { inlineImages: a.inlineImages, inlineCss: a.inlineCss }],
+  browser_download_queue: (a) => ['download.queue', { action: a.action }],
+  browser_export_chat: (a) => ['chat.export', { format: a.format }],
   browser_list_tabs: () => ['tab.list', {}],
   browser_open_tab: (a) => ['tab.open', { url: a.url }],
 };

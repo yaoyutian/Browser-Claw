@@ -14,6 +14,19 @@ import {
   clearSiteRules,
   removeSiteRule,
 } from './site-rules.js';
+import { buildClipMarkdown, buildClipText, frontmatter } from '../shared/clip.js';
+import { buildChatMarkdown, buildChatText } from '../shared/chat-export.js';
+import { getHistory as getChatHistory, setHistory as setChatHistory, clearHistory as clearChatHistory } from './chat-history.js';
+import {
+  enqueue as enqueueDownloads,
+  snapshot as queueSnapshot,
+  clear as clearQueue,
+  cancelAll as cancelAllQueue,
+  setPaused as setQueuePaused,
+  remove as removeFromQueue,
+  processQueue as runQueue,
+  recover as recoverQueue,
+} from './download-queue.js';
 
 /** 判断是否为 HLS/DASH 播放清单（需要 ffmpeg 合并，扩展无法直接下载）。 */
 function isStreamManifest(url) {
@@ -43,6 +56,7 @@ async function sendToContent(tabId, message) {
         'src/content/media.js',
         'src/content/extractor.js',
         'src/content/style-agent.js',
+        'src/content/archiver.js',
         'src/content/content.js',
       ],
     }).catch((e) => {
@@ -393,6 +407,71 @@ function dedupeFilenames(items) {
   });
 }
 
+/**
+ * 解析下载的真实落盘路径。
+ * chrome.downloads.download 返回的是请求的文件名，
+ * 但同名文件会被浏览器加上 " (1)" 之类的后缀，
+ * 所以要用返回的 downloadId 反查实际路径。
+ */
+async function resolveDownloadPath(downloadId, fallback) {
+  try {
+    const list = await chrome.downloads.search({ id: downloadId });
+    const item = list?.[0];
+    if (!item) return fallback;
+    // finalPath 是绝对路径（Chrome 121+），最可靠
+    if (item.finalPath) return item.finalPath;
+    if (!item.filename) return fallback;
+    // filename 可能是相对路径；用 target（file:// URL）补全
+    if (item.target && item.target.startsWith('file://')) {
+      try {
+        const p = decodeURIComponent(new URL(item.target).pathname);
+        return p.split('/').join(String.fromCharCode(92));
+      } catch { /* ignore */ }
+    }
+    return item.filename;
+  } catch { /* ignore */ }
+  return fallback;
+}
+
+/** 字符串的 UTF-8 字节数（JS 的 .length 是 UTF-16 码元数，中文会偏小）。 */
+function utf8Bytes(str) {
+  return new TextEncoder().encode(String(str)).length;
+}
+
+/**
+ * 队列执行器：把队列里的任务真正下载掉。
+ * m3u8/mpd 走 companion + ffmpeg，其余走 chrome.downloads。
+ */
+async function startQueueRunner({ concurrency = 3 } = {}) {
+  await recoverQueue();
+  return runQueue(async (item) => {
+    if (isStreamManifest(item.url)) {
+      const companion = await findCompanion();
+      if (!companion) {
+        throw new Error('HLS/DASH 需要本地 companion + ffmpeg');
+      }
+      const res = await companionFetch(
+        '/hls',
+        {
+          targetUrl: item.url,
+          filename: item.filename,
+          referer: item.referer,
+          cookie: await cookieHeaderFor(item.url),
+        },
+        { timeout: 300_000 }
+      );
+      if (!res.ok) throw new Error(res.error || 'ffmpeg 合并失败');
+      return { mode: 'ffmpeg', size: res.data?.size };
+    }
+    const r = await downloadOne(item.url, {
+      filename: item.filename,
+      referer: item.referer,
+    });
+    if (!r?.id) throw new Error('下载未启动');
+    return { id: r.id, mode: r.mode };
+  }, { concurrency });
+}
+
 /** 采集表格文档并生成下载清单。 */
 async function collectTableDocs(args) {
   const data = await contentCall(
@@ -544,6 +623,210 @@ export const handlers = {
     return value;
   },
 
+  async 'clip.export'(args) {
+    // 选区只存在于 MAIN world —— 隔离世界读不到用户真正选中的内容。
+    const tab = await getTab(args.tabId);
+    if (!tab?.id) throw new ToolError('找不到目标标签页');
+    if (!/^https?:|^file:/.test(tab.url || '')) {
+      throw new ToolError('当前页面不支持摘录');
+    }
+
+    const scope = args.scope || 'selection';
+    const format = args.format || 'md';
+
+    // 1) 选区 + 上下文（MAIN world）
+    let selection = null;
+    if (scope === 'selection') {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: () => {
+          const sel = window.getSelection();
+          if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+          const text = sel.toString().replace(/\s+/g, ' ').trim();
+          if (!text) return null;
+          let context = '';
+          try {
+            const node = sel.anchorNode;
+            const el = node?.nodeType === 1 ? node : node?.parentElement;
+            context = (el?.closest?.('article, main, section, p, li, h1, h2, h3')?.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 800);
+          } catch { /* ignore */ }
+          return { text, context, url: location.href, title: document.title };
+        },
+      });
+      selection = results?.[0]?.result || null;
+      if (!selection) {
+        throw new ToolError(
+          '当前页面没有选中内容',
+          '请先在页面上选中一段文字，或改用 scope="article" 摘录整篇'
+        );
+      }
+    }
+
+    // 2) 页面元信息
+    const meta = await contentCall({ type: 'nbc:meta' }, args.tabId);
+
+    // 3) 正文（scope=article 时）
+    let articleMarkdown = '';
+    if (scope === 'article') {
+      const extracted = await contentCall({ type: 'nbc:extract' }, args.tabId);
+      articleMarkdown = extracted.markdown || '';
+    }
+
+    const createdAt = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    const baseName =
+      `clip-${(meta.title || 'note').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60)}-${Date.now()}`;
+
+    // 4) scope=article —— 整篇正文
+    if (scope === 'article') {
+      const md = `${frontmatter({
+        title: meta.title,
+        source: meta.canonical || tab.url,
+        author: meta.author || undefined,
+        published: meta.published || undefined,
+        site: meta.siteName || undefined,
+        created: createdAt,
+        tags: ['clippings'],
+      })}\n\n${articleMarkdown}\n`;
+      const id = await saveBlob(
+        new Blob([md], { type: 'text/markdown;charset=utf-8' }),
+        `${baseName}.md`
+      );
+      return {
+        ok: true,
+        id,
+        format: 'md',
+        scope: 'article',
+        filename: `${baseName}.md`,
+        bytes: utf8Bytes(md),
+        preview: md.slice(0, 400),
+        source: meta.canonical || tab.url,
+      };
+    }
+
+    const clip = {
+      text: selection?.text || '',
+      context: selection?.context || '',
+      title: meta.title || '',
+      url: meta.canonical || tab.url,
+      author: meta.author,
+      published: meta.published,
+      siteName: meta.siteName,
+      note: args.note || '',
+      selectedAt: createdAt,
+    };
+
+    // 5) 选区 —— 按格式输出
+    if (format === 'txt') {
+      const txt = buildClipText(clip);
+      const id = await saveBlob(
+        new Blob([txt], { type: 'text/plain;charset=utf-8' }),
+        `${baseName}.txt`
+      );
+      return {
+        ok: true,
+        id,
+        format: 'txt',
+        scope: 'selection',
+        filename: `${baseName}.txt`,
+        bytes: utf8Bytes(txt),
+        source: clip.url,
+      };
+    }
+
+    if (format !== 'md') {
+      throw new ToolError(`不支持的格式: ${format}`, '可用：md / txt');
+    }
+
+    const md = buildClipMarkdown(clip);
+    const id = await saveBlob(
+      new Blob([md], { type: 'text/markdown;charset=utf-8' }),
+      `${baseName}.md`
+    );
+    return {
+      ok: true,
+      id,
+      format: 'md',
+      scope: 'selection',
+      filename: `${baseName}.md`,
+      bytes: utf8Bytes(md),
+      preview: md.slice(0, 400),
+      source: clip.url,
+    };
+  },
+
+  async 'page.archive'(args) {
+    const tab = await getTab(args.tabId);
+    if (!tab?.id) throw new ToolError('找不到目标标签页');
+    if (!/^https?:|^file:/.test(tab.url || '')) {
+      throw new ToolError('当前页面不支持归档');
+    }
+
+    const options = {
+      inlineImages: args.inlineImages !== false,
+      inlineCss: args.inlineCss !== false,
+      includeIframes: args.includeIframes === true,
+      keepDynamic: args.keepDynamic === true,
+    };
+
+    const result = await contentCall({ type: 'nbc:archive', options }, args.tabId);
+    if (!result?.html) throw new ToolError('归档失败', '页面内容为空');
+
+    const html = result.html;
+    const bytes = utf8Bytes(html);
+    const baseName =
+      `archive-${(result.meta?.site || 'page')}-` +
+      `${(result.meta?.title || 'untitled').replace(/[\/:*?"<>|]+/g, '_').slice(0, 60)}-` +
+      `${new Date().toISOString().slice(0, 10)}`;
+
+    // 大文件走 data: URL 会占用大量内存（base64 膨胀约 1/3），
+    // 超过阈值时改由本地 companion 保存到磁盘。
+    const LARGE = 8 * 1024 * 1024;
+    if (bytes > LARGE) {
+      const companion = await findCompanion();
+      if (!companion) {
+        throw new ToolError(
+          `归档文件较大（${(bytes / 1024 / 1024).toFixed(1)} MB），需要本地 companion 才能保存`,
+          '请运行 node companion/server.mjs 后重试'
+        );
+      }
+      const res = await companionFetch(
+        '/save',
+        { filename: `${baseName}.html`, content: html },
+        { timeout: 120_000 }
+      );
+      if (!res.ok) throw new ToolError('归档保存失败', res.error);
+      return {
+        ok: true,
+        filename: `${baseName}.html`,
+        bytes,
+        stats: result.stats,
+        meta: result.meta,
+        path: res.data?.path,
+        savedBy: 'companion',
+      };
+    }
+
+    const id = await saveBlob(
+      new Blob([html], { type: 'text/html;charset=utf-8' }),
+      `${baseName}.html`
+    );
+    const path = await resolveDownloadPath(id, `${baseName}.html`);
+    return {
+      ok: true,
+      id,
+      filename: `${baseName}.html`,
+      path,
+      bytes,
+      stats: result.stats,
+      meta: result.meta,
+      savedBy: 'extension',
+    };
+  },
+
   async 'page.screenshot'(args) {
     return captureScreenshot(args.tabId);
   },
@@ -660,6 +943,19 @@ export const handlers = {
     if (!urls.length) throw new ToolError('没有要下载的 URL');
     const items = urls.map((u) => (typeof u === 'string' ? { url: u } : u));
 
+    // 队列模式：立即入队并后台执行，不阻塞当前对话。
+    // 适合几十个以上的大批量下载。
+    if (args.queue) {
+      const enq = await enqueueDownloads(items);
+      startQueueRunner({ concurrency: args.concurrency || 3 });
+      return {
+        queued: enq.added,
+        ids: enq.ids,
+        mode: 'queue',
+        hint: '已加入下载队列，可在下载面板查看进度',
+      };
+    }
+
     // HLS/DASH 清单无法在扩展内合并分片 —— 交给 companion 用 ffmpeg 处理。
     const streamItems = items.filter((it) => isStreamManifest(it.url));
     const directItems = items.filter((it) => !isStreamManifest(it.url));
@@ -726,6 +1022,56 @@ export const handlers = {
         path: r.path,
       })),
     };
+  },
+
+  async 'chat.export'(args) {
+    const history = await getChatHistory();
+    const messages = history.messages || [];
+    if (!messages.length) {
+      throw new ToolError('当前没有可导出的对话', '先聊几句再导出');
+    }
+    const meta = {
+      title: args.title || history.meta?.title || '与 AI 的对话',
+      model: history.meta?.model,
+      provider: history.meta?.provider,
+      startedAt: history.meta?.startedAt,
+      exportedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+    };
+
+    const format = args.format || 'md';
+    const baseName = `chat-${new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)}`;
+
+    if (format === 'txt') {
+      const txt = buildChatText(messages, meta);
+      const id = await saveBlob(new Blob([txt], { type: 'text/plain;charset=utf-8' }), `${baseName}.txt`);
+      return { ok: true, id, format, filename: `${baseName}.txt`, bytes: utf8Bytes(txt), count: messages.length };
+    }
+
+    const md = buildChatMarkdown(messages, meta);
+    const id = await saveBlob(
+      new Blob([md], { type: 'text/markdown;charset=utf-8' }),
+      `${baseName}.md`
+    );
+    return {
+      ok: true,
+      id,
+      format: 'md',
+      filename: `${baseName}.md`,
+      bytes: utf8Bytes(md),
+      count: messages.length,
+      preview: md.slice(0, 500),
+    };
+  },
+
+  async 'download.queue'(args) {
+    const action = args.action || 'status';
+    if (action === 'status') return { ok: true, queue: queueSnapshot() };
+    if (action === 'clear') return { ok: true, ...(await clearQueue()) };
+    if (action === 'cancel') return { ok: true, ...(await cancelAllQueue()) };
+    if (action === 'pause') return { ok: true, ...(await setQueuePaused(true)) };
+    if (action === 'resume') return { ok: true, ...(await setQueuePaused(false)) };
+    if (action === 'remove') return { ok: true, ...(await removeFromQueue(args.id)) };
+    throw new ToolError(`未知操作: ${action}`, '可用：status / clear / cancel / pause / resume / remove');
   },
 
   async 'doc.export'(args) {

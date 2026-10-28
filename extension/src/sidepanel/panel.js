@@ -4,6 +4,7 @@ import { PROVIDER_PRESETS, PRESET_MAP, resolveProvider, listModels } from '../sh
 import { runAgent, systemPrompt } from '../shared/agent.js';
 import { Text } from '../shared/providers.js';
 import { TOOLS } from '../shared/tools.js';
+import { formatBytes } from '../shared/util.js';
 import {
   detectTools,
   fetchToolConfig,
@@ -30,6 +31,10 @@ const el = {
   auto: $('chk-auto'),
   selectionBar: $('selection-bar'),
   selectionText: $('selection-text'),
+  queuePanel: $('queue-panel'),
+  queueList: $('queue-list'),
+  queueSummary: $('queue-summary'),
+  queueToggle: $('btn-queue-toggle'),
 };
 
 const state = {
@@ -38,6 +43,7 @@ const state = {
   busy: false,
   controller: null,
   selection: null,
+  chatStartedAt: null,
   tools: {
     ffmpegPath: '',
     ytdlpPath: '',
@@ -341,6 +347,7 @@ async function send() {
   el.send.disabled = true;
   state.busy = true;
   state.controller = new AbortController();
+  if (!state.chatStartedAt) state.chatStartedAt = new Date().toISOString();
 
   renderMessage('user', text);
 
@@ -406,6 +413,7 @@ async function send() {
     });
     state.messages = result.messages.filter((m) => m.role !== 'system');
     await saveSettings();
+    syncChatHistory();
   } catch (err) {
     if (err?.name === 'AbortError') {
       acc += '\n（已中断）';
@@ -463,9 +471,11 @@ el.input.addEventListener('input', () => {
 el.clear.addEventListener('click', () => {
   if (state.busy) return;
   state.messages = [];
+  state.chatStartedAt = null;
   el.messages.innerHTML = '';
   el.tray.hidden = true;
   el.tray.innerHTML = '';
+  chrome.runtime.sendMessage({ type: 'nbc:chat:sync', messages: [], meta: {} }).catch(() => {});
 });
 
 el.btnSettings.addEventListener('click', openSettings);
@@ -685,6 +695,150 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 // ---------------------------------------------------------------------------
+// 对话历史同步与导出
+// ---------------------------------------------------------------------------
+
+/** 把对话历史同步给后台，供 chat.export 工具读取。 */
+async function syncChatHistory() {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'nbc:chat:sync',
+      messages: state.messages,
+      meta: {
+        model: state.provider?.model,
+        provider: state.provider?.label || state.provider?.providerId,
+        startedAt: state.chatStartedAt,
+      },
+    });
+  } catch { /* 后台未就绪，忽略 */ }
+}
+
+/** 导出当前对话为 Markdown。 */
+async function exportChat() {
+  if (!state.messages.length) {
+    el.statusHint.textContent = '还没有对话可导出';
+    setTimeout(() => (el.statusHint.textContent = ''), 2000);
+    return;
+  }
+  await syncChatHistory();
+  const res = await chrome.runtime.sendMessage({
+    type: 'nbc:tool',
+    name: 'chat.export',
+    args: { format: 'md' },
+  });
+  if (res?.ok) {
+    el.statusHint.textContent = `已导出：${res.data.filename}`;
+  } else {
+    el.statusHint.textContent = `导出失败：${res?.error || '未知错误'}`;
+  }
+  setTimeout(() => (el.statusHint.textContent = ''), 3000);
+}
+
+// ---------------------------------------------------------------------------
+// 下载队列
+// ---------------------------------------------------------------------------
+
+const QUEUE_ICON = {
+  pending: '○',
+  running: '◐',
+  done: '●',
+  failed: '✕',
+  cancelled: '—',
+};
+
+function renderQueue(queue) {
+  if (!queue) return;
+  const total = queue.total || 0;
+  const hasItems = total > 0;
+  el.queuePanel.hidden = !hasItems;
+  if (!hasItems) return;
+
+  el.queueSummary.textContent =
+    `${queue.done || 0}/${total} 完成` +
+    (queue.failed ? ` · ${queue.failed} 失败` : '') +
+    (queue.pending ? ` · ${queue.pending} 等待` : '') +
+    (queue.bytes ? ` · ${formatBytes(queue.bytes)}` : '');
+
+  el.queueToggle.textContent = queue.paused ? '继续' : '暂停';
+
+  el.queueList.innerHTML = '';
+  for (const item of queue.items || []) {
+    const wrap = document.createElement('div');
+    wrap.className = 'q-item-wrap';
+
+    const row = document.createElement('div');
+    row.className = 'q-item';
+
+    const name = document.createElement('span');
+    name.className = 'q-name';
+    name.textContent = item.filename || item.url;
+    name.title = item.url;
+
+    const status = document.createElement('span');
+    status.className = `q-status ${item.status}`;
+    status.textContent =
+      item.status === 'failed'
+        ? QUEUE_ICON.failed + ' ' + (item.error || '失败')
+        : QUEUE_ICON[item.status] || '';
+
+    row.append(name, status);
+    wrap.appendChild(row);
+
+    // 进度条
+    if (item.status === 'running' && item.totalBytes > 0) {
+      const bar = document.createElement('div');
+      bar.className = 'q-bar';
+      const fill = document.createElement('i');
+      fill.style.width = `${Math.min(100, (item.bytes / item.totalBytes) * 100)}%`;
+      bar.appendChild(fill);
+      wrap.appendChild(bar);
+    }
+
+    el.queueList.appendChild(wrap);
+  }
+}
+
+// 队列事件（后台广播）
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === 'nbc:queue:update') renderQueue(msg.queue);
+});
+
+$('btn-export-chat').addEventListener('click', exportChat);
+
+$('btn-queue-close').addEventListener('click', () => {
+  el.queuePanel.hidden = true;
+});
+
+$('btn-queue-toggle').addEventListener('click', async () => {
+  const paused = el.queueToggle.textContent === '继续';
+  await chrome.runtime.sendMessage({
+    type: 'nbc:tool',
+    name: 'download.queue',
+    args: { action: paused ? 'resume' : 'pause' },
+  });
+});
+
+$('btn-queue-clear').addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'nbc:tool',
+    name: 'download.queue',
+    args: { action: 'clear' },
+  });
+});
+
+// 启动时拉一次队列状态
+async function refreshQueue() {
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'nbc:tool',
+      name: 'download.queue',
+      args: { action: 'status' },
+    });
+    if (res?.ok) renderQueue(res.data?.queue);
+  } catch { /* 后台未就绪，忽略 */ }
+}
+
+// ---------------------------------------------------------------------------
 // 划词提问
 // ---------------------------------------------------------------------------
 
@@ -753,6 +907,7 @@ chrome.commands?.onCommand?.addListener?.(() => el.input.focus());
   updateProviderBar();
   el.input.focus();
   checkCurrentSelection();
+  refreshQueue();
 
   if (!state.provider.apiKey && !PRESET_MAP[state.provider.providerId]?.noKey) {
     el.messages.innerHTML =
