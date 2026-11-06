@@ -75,6 +75,7 @@ async function loadSettings() {
     companionUrl: s.companionUrl || '',
     temperature: s.temperature ?? 0.7,
     maxTokens: s.maxTokens || 8192,
+    thinking: s.thinking || 'auto',
   };
 
   const t = stored[TOOLS_KEY] || {};
@@ -135,6 +136,9 @@ function syncSettingsForm() {
   $('inp-temp').value = p.temperature ?? 0.7;
   $('temp-value').textContent = String(p.temperature ?? 0.7);
   $('inp-maxtokens').value = p.maxTokens || 8192;
+  $('sel-thinking').value = p.thinking || 'auto';
+  // 只有支持思考模式的服务商才显示这个选项
+  $('thinking-field').hidden = !resolveProvider(p).supportsThinking;
 
   const t = state.tools;
   $('inp-ffmpeg').value = t.ffmpegPath || '';
@@ -357,15 +361,24 @@ async function send() {
   let acc = '';
   let rendered = '';
   const toolCards = new Map();
+  let lastError = null;
 
   const pageCtx = await currentPageContext();
   const history = [...state.messages];
   history.push({ role: 'user', content: [Text(text)] });
 
+  // 事件回调：函数式（agent.js 的约定）
   const events = {
     text: (t) => {
       acc += t;
       bubble.textContent = acc;
+      scrollToBottom();
+    },
+    reasoning: (t) => {
+      // 思考模式的思维链：折叠展示，不进对话历史
+      acc += t;
+      bubble.textContent = acc;
+      bubble.classList.add('is-reasoning');
       scrollToBottom();
     },
     tool_start: (ev) => {
@@ -395,8 +408,9 @@ async function send() {
       }
     },
     error: (ev) => {
-      acc += `\n[错误] ${ev.error}`;
-      bubble.textContent = acc;
+      // agent.js 在抛错前会先发 error 事件，随后 catch 块也会写一次。
+      // 这里只记录不展示，避免同一个错误显示两遍。
+      lastError = ev.error;
     },
   };
 
@@ -418,12 +432,15 @@ async function send() {
     if (err?.name === 'AbortError') {
       acc += '\n（已中断）';
     } else {
-      acc += `\n[错误] ${err?.message || String(err)}`;
+      const msg = err?.message || String(err);
+      const detail = err?.detail ? `\n${String(err.detail).slice(0, 400)}` : '';
+      acc += `\n[错误] ${msg}${detail}`;
     }
   } finally {
     // 最终按 Markdown 渲染（流式阶段是纯文本，避免标签闪烁）。
     rendered = renderMarkdown(acc);
     bubble.innerHTML = rendered;
+    bubble.classList.remove('is-reasoning');
     state.busy = false;
     state.controller = null;
     el.send.disabled = false;
@@ -561,6 +578,7 @@ $('btn-save-settings').addEventListener('click', async () => {
   state.provider.relayUrl = $('inp-relay').value.trim().replace(/\/+$/, '');
   state.provider.temperature = Number($('inp-temp').value);
   state.provider.maxTokens = Number($('inp-maxtokens').value) || 8192;
+  state.provider.thinking = $('sel-thinking').value;
 
   state.tools.ffmpegPath = $('inp-ffmpeg').value.trim();
   state.tools.ytdlpPath = $('inp-ytdlp').value.trim();
@@ -627,6 +645,64 @@ async function detect(kind) {
     );
   }
 }
+
+$('btn-test-conn').addEventListener('click', async () => {
+  const btn = $('btn-test-conn');
+  const status = $('conn-status');
+  btn.disabled = true;
+  btn.textContent = '测试中…';
+  status.textContent = '';
+  status.style.color = '';
+
+  const provider = {
+    providerId: state.provider.providerId,
+    kind: state.provider.kind,
+    baseUrl: $('inp-baseurl').value.trim(),
+    apiKey: $('inp-key').value.trim(),
+    model: $('inp-model').value.trim(),
+    transport: $('sel-transport').value,
+    relayUrl: $('inp-relay').value.trim(),
+    noKey: PRESET_MAP[state.provider.providerId]?.noKey,
+  };
+
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'nbc:tool',
+      name: 'diagnose.connection',
+      args: { provider },
+    });
+    if (!res?.ok) {
+      status.textContent = `诊断失败：${res?.error || '未知错误'}`;
+      status.style.color = 'var(--err)';
+    } else {
+      const direct = res.data.tests.find((t) => t.path === 'direct');
+      const relay = res.data.tests.find((t) => t.path === 'relay');
+      const lines = [];
+      if (direct) {
+        lines.push(
+          direct.ok
+            ? `✓ 直连正常（${direct.ms}ms）${direct.note ? ' · ' + direct.note : ''}`
+            : `✗ 直连失败：${direct.error || direct.note}`
+        );
+      }
+      if (relay) {
+        lines.push(
+          relay.ok
+            ? `✓ 本地中继可用（${relay.ms}ms）`
+            : `✗ 本地中继不可用：${relay.error || relay.note}`
+        );
+      }
+      status.textContent = lines.join('\n');
+      status.style.color = direct?.ok ? 'var(--ok)' : 'var(--err)';
+    }
+  } catch (e) {
+    status.textContent = `测试失败：${e?.message || e}`;
+    status.style.color = 'var(--err)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '测试连接';
+  }
+});
 
 $('btn-detect-ffmpeg').addEventListener('click', () => detect('ffmpeg'));
 $('btn-detect-ytdlp').addEventListener('click', () => detect('ytdlp'));

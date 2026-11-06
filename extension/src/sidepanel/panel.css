@@ -259,6 +259,12 @@ body {
 .msg.assistant .bubble { background: var(--bg-soft); border: 1px solid var(--border); }
 .msg.error .bubble { background: rgba(248, 113, 113, 0.1); border: 1px solid var(--err); color: var(--err); }
 
+/* 思考模式：流式阶段的思维链用浅色斜体，与正式回答区分 */
+.bubble.is-reasoning {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
 .bubble code {
   font-family: var(--mono);
   font-size: 12px;

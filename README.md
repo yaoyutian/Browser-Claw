@@ -216,6 +216,15 @@ claude mcp add netbrowserclaw -- node /绝对路径/companion/server.mjs --mcp
 **内置预设**：OpenAI、Anthropic Claude、Google Gemini、DeepSeek、Kimi 月之暗面、
 阿里云百炼通义千问、智谱 GLM、硅基流动、OpenRouter、Ollama、LM Studio
 
+**DeepSeek 用户注意**：官方当前的模型是 `deepseek-flash` 与 `deepseek-v4-pro`
+（旧的 `deepseek-chat` / `deepseek-reasoner` 已下线），Base URL 填 `https://api.deepseek.com`。
+DeepSeek 默认开启**思考模式**，会先输出一段思维链再回答 —— 侧边栏里以浅色斜体展示，
+可在设置里关掉（更快、更省 token）。
+
+**连不上？** 设置里 Base URL 下方有「**测试连接**」按钮，会分别测「浏览器直连」与
+「本地中继」两条路径，告诉你到底卡在哪一环。也可以直接对 AI 说「诊断连接」，
+它会调用 `diagnose.connection` 工具给出同样的结论。
+
 **自定义**：任何 OpenAI 兼容端点，填 Base URL（到 `/v1` 为止）+ 模型名 + Key 即可。
 
 **连接方式**：
@@ -248,16 +257,21 @@ docs/               可行性评估 · 架构设计 · 开源借鉴 · 路线图
 ```bash
 node scripts/make-icons.mjs     # 重新生成图标
 node scripts/check-project.mjs  # 项目结构自检（manifest 引用 + 工具/handler 一致性）
-node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 113 项
+node scripts/test-agent.mjs     # agent 循环单元测试（不依赖浏览器与网络）— 37 项
+node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 118 项
 node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS）— 23 项
 ```
+
+> `test-agent.mjs` 单独存在是有原因的：端到端测试是**直接调工具**，
+> 绕过了 agent 循环，所以「模型 → 工具 → 模型」这条主链路的问题
+> E2E 测不出来。历史上就是这么漏掉了 `onEvent is not a function` 这类致命 bug。
 
 验证脚本会**真实启动 Edge、加载扩展、打开测试页**，然后断言工具的**实际副作用**
 （广告位 `display` 是否真变成 `none`、背景色是否真变了、下载的文件是否真落盘、
 DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成可播放的视频），
 而不只是检查返回值。
 
-当前状态：**136/136 通过**。
+当前状态：**178/178 通过**。
 
 新增一个工具只要三步：
 

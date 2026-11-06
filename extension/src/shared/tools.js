@@ -441,6 +441,19 @@ export const TOOLS = [
     },
   },
   {
+    name: 'diagnose.connection',
+    description:
+      '诊断当前模型服务的连通性：分别测试「浏览器直连」与「本地中继」两条路径，' +
+      '报告是否能到达、返回什么状态码、耗时多少。' +
+      '当用户说「连不上」「报错」「Failed to fetch」时，先用这个工具定位问题。',
+    parameters: {
+      type: 'object',
+      properties: {
+        testRelay: { type: 'boolean', description: '是否也测试本地中继，默认 true' },
+      },
+    },
+  },
+  {
     name: 'doc.export',
     description:
       '把一段内容保存为文件。format 可选：md（Markdown）、docx（Word）、html、txt。' +

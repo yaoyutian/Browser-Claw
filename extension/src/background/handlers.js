@@ -15,6 +15,7 @@ import {
   removeSiteRule,
 } from './site-rules.js';
 import { buildClipMarkdown, buildClipText, frontmatter } from '../shared/clip.js';
+import { resolveProvider } from '../shared/providers.js';
 import { buildChatMarkdown, buildChatText } from '../shared/chat-export.js';
 import { getHistory as getChatHistory, setHistory as setChatHistory, clearHistory as clearChatHistory } from './chat-history.js';
 import {
@@ -1073,6 +1074,84 @@ export const handlers = {
     if (action === 'remove') return { ok: true, ...(await removeFromQueue(args.id)) };
     throw new ToolError(`未知操作: ${action}`, '可用：status / clear / cancel / pause / resume / remove');
   },
+
+  async 'diagnose.connection'(args) {
+    const p = resolveProvider(args.provider || {});
+    const report = { provider: p.label, model: p.model, transport: p.transport, tests: [] };
+
+    // 1) 直连测试：用一个最小请求看能不能到达服务端
+    const t0 = Date.now();
+    try {
+      const url = `${p.baseUrl.replace(/\/+$/, '')}/models`;
+      const headers = { 'Content-Type': 'application/json' };
+      if (!p.noKey && p.apiKey) headers.Authorization = `Bearer ${p.apiKey}`;
+      const res = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(15000) });
+      let note = '';
+      if (res.status === 401) note = '已到达服务端，但 API Key 无效';
+      else if (res.status === 404) note = '已到达服务端，但该地址没有 /models 接口（部分服务商不支持）';
+      else if (res.ok) note = '连接正常';
+      else note = `已到达服务端，返回 ${res.status}`;
+      report.tests.push({
+        path: 'direct',
+        ok: res.ok || res.status === 401,
+        status: res.status,
+        ms: Date.now() - t0,
+        note,
+        url,
+      });
+    } catch (e) {
+      report.tests.push({
+        path: 'direct',
+        ok: false,
+        ms: Date.now() - t0,
+        error: e?.message || String(e),
+        note:
+          '无法访问模型服务。常见原因：① 系统代理未被扩展继承；' +
+          '② Base URL 写错；③ 网络受限。改用「本地中继」可绕过前两项。',
+        url: p.baseUrl,
+      });
+    }
+
+    // 2) 中继测试
+    if (args.testRelay !== false) {
+      const t1 = Date.now();
+      const base = await findCompanion();
+      if (!base) {
+        report.tests.push({
+          path: 'relay',
+          ok: false,
+          ms: Date.now() - t1,
+          error: '未找到本地 companion',
+          note: '请运行 node companion/server.mjs',
+        });
+      } else {
+        try {
+          const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(5000) });
+          const data = await res.json();
+          report.tests.push({
+            path: 'relay',
+            ok: true,
+            ms: Date.now() - t1,
+            status: res.status,
+            note: `companion 已连接（${base}）`,
+          });
+          report.relay = { url: base, tools: data.tools };
+        } catch (e) {
+          report.tests.push({
+            path: 'relay',
+            ok: false,
+            ms: Date.now() - t1,
+            error: e?.message || String(e),
+            note: `companion 地址 ${base} 无法访问`,
+          });
+        }
+      }
+    }
+
+    report.summary = report.tests.map((t) => `${t.path}: ${t.ok ? 'OK' : '失败'}`).join('，');
+    return report;
+  },
+
 
   async 'doc.export'(args) {
     if (!args.content) throw new ToolError('导出内容为空');

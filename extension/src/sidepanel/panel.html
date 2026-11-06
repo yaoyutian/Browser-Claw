@@ -102,7 +102,11 @@
       <section class="field">
         <label for="inp-baseurl">接口地址 (Base URL)</label>
         <input id="inp-baseurl" type="text" placeholder="https://api.example.com/v1" />
-        <p class="hint">OpenAI 兼容接口填到 <code>/v1</code> 即可。</p>
+        <div class="row">
+          <p class="hint">OpenAI 兼容接口填到 <code>/v1</code> 即可。</p>
+          <button id="btn-test-conn" class="mini-btn" title="测试能否连通这个接口">测试连接</button>
+        </div>
+        <p class="hint" id="conn-status"></p>
       </section>
 
       <section class="field">
@@ -126,6 +130,19 @@
       <section class="field">
         <label for="inp-temp">温度 <span id="temp-value" class="mono">0.7</span></label>
         <input id="inp-temp" type="range" min="0" max="2" step="0.1" value="0.7" />
+      </section>
+
+      <section class="field" id="thinking-field" hidden>
+        <label for="sel-thinking">思考模式</label>
+        <select id="sel-thinking">
+          <option value="auto">自动（由服务端决定）</option>
+          <option value="on">开启（显示模型的思考过程）</option>
+          <option value="off">关闭（更快，省 token）</option>
+        </select>
+        <p class="hint">
+          支持思考模式的服务商（如 DeepSeek）默认会先输出思维链再回答。
+          关闭可减少 token 消耗、加快响应。
+        </p>
       </section>
 
       <section class="field">

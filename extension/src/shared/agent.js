@@ -10,8 +10,15 @@ import { truncate, redact } from './util.js';
 const MAX_ROUNDS = 12;
 
 /** 调用后台执行工具。 */
-export async function runTool(name, args) {
-  const res = await chrome.runtime.sendMessage({ type: 'nbc:tool', name, args });
+/**
+ * 调用一个浏览器工具。
+ *
+ * 会自动把当前的 provider 配置带上 —— 有些工具（如 diagnose.connection）
+ * 需要知道用户正在用哪个服务商、哪个 Base URL。
+ */
+export async function runTool(name, args = {}, provider = null) {
+  const payload = provider ? { ...args, provider } : args;
+  const res = await chrome.runtime.sendMessage({ type: 'nbc:tool', name, args: payload });
   if (!res) throw new Error('后台无响应（service worker 可能正在重启，请重试）');
   if (!res.ok) {
     const err = new Error(res.error || '工具执行失败');
@@ -22,43 +29,92 @@ export async function runTool(name, args) {
 }
 
 /**
+ * 事件分发适配层。
+ *
+ * onEvent 支持两种形式：
+ *   · 函数   —— onEvent({ type: 'text', text })
+ *   · 对象   —— { text: (t) => {...}, tool_start: (ev) => {...} }
+ *
+ * 历史上两边约定不一致（agent.js 当函数调、panel.js 传对象），
+ * 出现过 "onEvent is not a function"。这里统一兼容，避免再犯。
+ */
+function makeEmitter(onEvent) {
+  if (!onEvent) return () => {};
+  if (typeof onEvent === 'function') {
+    return (ev) => {
+      try {
+        onEvent(ev);
+      } catch (e) {
+        console.warn('[nbc agent] onEvent 处理出错', e);
+      }
+    };
+  }
+  if (typeof onEvent === 'object') {
+    return (ev) => {
+      const handler = onEvent[ev?.type];
+      if (typeof handler !== 'function') return;
+      try {
+        // 文本事件历史上传的是字符串，其余传整个事件对象
+        handler(ev.type === 'text' ? ev.text : ev);
+      } catch (e) {
+        console.warn('[nbc agent] onEvent 处理出错', e);
+      }
+    };
+  }
+  console.warn('[nbc agent] onEvent 类型不正确，已忽略', typeof onEvent);
+  return () => {};
+}
+
+/**
  * 执行一轮 agent 循环。
  *
  * @param {object} opts
  * @param {Array} opts.messages  历史消息（内部统一格式）
  * @param {object} opts.provider  服务商配置
- * @param {(ev)=>void} opts.onEvent 事件回调：text / tool_start / tool_end / error / done
+ * @param {(ev)=>void|object} opts.onEvent 事件回调：text / tool_start / tool_end / error / done。
+ *        可以是函数，也可以是 `{ text: fn, tool_start: fn, ... }` 形式的对象。
  * @param {AbortSignal} opts.signal
  * @param {(name, input)=>Promise<boolean>} opts.beforeTool 工具执行前的确认钩子；
  *        返回 false 则跳过该工具，把「已跳过」作为结果回传给模型
  * @returns {{messages: Array, toolCalls: number}}
  */
 export async function runAgent({ messages, provider, onEvent, signal, enabledTools, beforeTool }) {
+  const emit = makeEmitter(onEvent);
   const tools = (enabledTools || TOOLS).filter((t) => providerSupportsTools(provider));
   const history = [...messages];
   let toolCalls = 0;
+  // 声明在循环外：达到最大轮次时循环外也要用到 assistantText。
+  let assistantText = '';
+  let reasoningText = '';
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    let assistantText = '';
+    // 注意：这两个变量声明在循环外（见上方）——
+    // 达到最大轮次时循环外也要用到 assistantText。
+    assistantText = '';
+    reasoningText = '';
     const pendingCalls = [];
 
     try {
       for await (const ev of streamChat(provider, { messages: history, tools, signal })) {
         if (ev.type === 'text') {
           assistantText += ev.text;
-          onEvent?.({ type: 'text', text: ev.text });
+          emit({ type: 'text', text: ev.text });
+        } else if (ev.type === 'reasoning') {
+          // 思考模式下的思维链 —— 只展示，不进对话历史
+          reasoningText += ev.text;
+          emit({ type: 'reasoning', text: ev.text });
         } else if (ev.type === 'tool_call') {
           pendingCalls.push(ev);
         }
       }
     } catch (err) {
-      onEvent?.({ type: 'error', error: err?.message || String(err), detail: err?.detail });
+      emit({ type: 'error', error: err?.message || String(err), detail: err?.detail });
       throw err;
     }
 
     if (!pendingCalls.length) {
       history.push({ role: 'assistant', content: [Text(assistantText)] });
-      onEvent?.({ type: 'done', text: assistantText, rounds: round + 1 });
+      emit({ type: 'done', text: assistantText, rounds: round + 1 });
       return { messages: history, toolCalls };
     }
 
@@ -83,7 +139,7 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
         }
         if (!approved) {
           const skipped = { skipped: true, reason: '用户拒绝了本次工具执行' };
-          onEvent?.({
+          emit({
             type: 'tool_end',
             id: call.id,
             name: call.name,
@@ -95,13 +151,13 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
         }
       }
 
-      onEvent?.({ type: 'tool_start', id: call.id, name: call.name, input: call.input });
+      emit({ type: 'tool_start', id: call.id, name: call.name, input: call.input });
 
       let output;
       let isError = false;
       try {
         if (!TOOL_MAP[call.name]) throw new Error(`未知工具 ${call.name}`);
-        output = await runTool(call.name, call.input || {});
+        output = await runTool(call.name, call.input || {}, provider);
       } catch (err) {
         isError = true;
         output = {
@@ -109,7 +165,7 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
           detail: err?.detail ? truncate(String(err.detail), 1000) : undefined,
         };
       }
-      onEvent?.({ type: 'tool_end', id: call.id, name: call.name, output, isError });
+      emit({ type: 'tool_end', id: call.id, name: call.name, output, isError });
       results.push(
         ToolResult(call.id, typeof output === 'string' ? output : JSON.stringify(output), isError)
       );
@@ -119,7 +175,7 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
     history.push({ role: 'user', content: results });
   }
 
-  onEvent?.({ type: 'done', text: assistantText, rounds: MAX_ROUNDS, truncated: true });
+  emit({ type: 'done', text: assistantText, rounds: MAX_ROUNDS, truncated: true });
   return { messages: history, toolCalls };
 }
 

@@ -27,6 +27,9 @@ jobs:
       - name: 项目结构自检
         run: node scripts/check-project.mjs
 
+      - name: agent 循环单元测试
+        run: node scripts/test-agent.mjs
+
   # 真实浏览器端到端验证
   e2e:
     runs-on: windows-latest

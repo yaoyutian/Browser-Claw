@@ -10,7 +10,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import {
   mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, readFileSync,
-  readdirSync, statSync,
 } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -799,16 +798,26 @@ async function main() {
   check('图片已内联', (assetsArchive.data?.stats?.imagesInlined || 0) >= 1,
     `imagesInlined=${assetsArchive.data?.stats?.imagesInlined}`);
 
-  // 读回归档产物，检查内容真的自包含（data: URI、脚本已移除、来源信息在）
-  // finalPath 在部分平台上是相对路径，且同名文件会被浏览器加 " (N)" 后缀，
-  // 所以直接到下载目录里找最新的「带资源页面」归档文件。
+  // 读回归档产物，检查内容真的自包含（data: URI、脚本已移除、来源信息在）。
+  // 用 handler 返回的真实路径，并等待文件出现 ——
+  // 用目录 glob 会匹配到上一轮遗留的旧文件，断言就失去意义了。
   const dlDir = join(homedir(), 'Downloads');
-  const candidates = readdirSync(dlDir)
-    .filter((f) => f.includes('archive-') && f.includes('带资源页面') && f.endsWith('.html'))
-    .map((f) => join(dlDir, f))
-    .map((p) => ({ p, t: statSync(p).mtimeMs }))
-    .sort((a, b) => b.t - a.t);
-  const archiveFile = candidates[0]?.p || '';
+  const rawPath = assetsArchive.data?.path || '';
+  let archiveFile = '';
+  if (rawPath) {
+    const candidate = /^[A-Za-z]:/.test(rawPath) ? rawPath : join(dlDir, rawPath);
+    // 浏览器可能给同名文件加 " (N)" 后缀，逐一尝试
+    const ext = candidate.slice(candidate.lastIndexOf('.'));
+    const stem = candidate.slice(0, candidate.length - ext.length).replace(/\s*\(\d+\)$/, '');
+    for (let i = 0; i < 20; i++) {
+      const p = i === 0 ? candidate : `${stem} (${i})${ext}`;
+      if (existsSync(p)) {
+        archiveFile = p;
+        break;
+      }
+      await sleep(250);
+    }
+  }
   check('归档文件已落盘', Boolean(archiveFile), archiveFile);
   if (archiveFile) {
     const html = readFileSync(archiveFile, 'utf8');
@@ -870,6 +879,28 @@ async function main() {
   check('含工具调用记录', (chat.data?.preview || '').includes('page.read'), '');
   check('含工具结果', (chat.data?.preview || '').includes('测试文章'), '');
   check('记录了消息条数', chat.data?.count === 3, `count=${chat.data?.count}`);
+
+  // --- 19. 连通性诊断 ----------------------------------------------------
+  console.log('\n[18] diagnose.connection —— 连通性诊断');
+  const diag = await panel.evaluate(`chrome.runtime.sendMessage({
+    type:'nbc:tool', name:'diagnose.connection',
+    args:{ provider: {
+      providerId:'deepseek', kind:'openai',
+      baseUrl:'https://api.deepseek.com', apiKey:'sk-invalid-test',
+      model:'deepseek-flash', transport:'direct'
+    } }
+  }).then(r=>JSON.stringify(r))`).then((s) => JSON.parse(s));
+  check('diagnose.connection 执行成功', diag.ok === true, diag.error || '');
+  check('返回了直连测试结果', diag.data?.tests?.some((t) => t.path === 'direct'),
+    JSON.stringify(diag.data?.tests?.map((t) => t.path)));
+  check('返回了中继测试结果', diag.data?.tests?.some((t) => t.path === 'relay'),
+    JSON.stringify(diag.data?.tests?.map((t) => t.path)));
+  const directTest = diag.data?.tests?.find((t) => t.path === 'direct');
+  check('直连测试有明确结论', Boolean(directTest?.ok !== undefined),
+    directTest?.note || directTest?.error || '');
+  check('失败时给出可操作的原因',
+    directTest?.ok !== false || Boolean(directTest?.note),
+    directTest?.note?.slice(0, 60) || '');
 
   console.log('\n面板控制台日志：');
   console.log(panel.logs.slice(-15).join('\n') || '（无）');

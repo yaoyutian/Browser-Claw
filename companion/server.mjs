@@ -14,6 +14,7 @@
 
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
+import { upgradeToWebSocket } from './ws-server.mjs';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join as pathJoin } from 'node:path';
@@ -163,6 +164,7 @@ function sendJson(res, status, payload) {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Private-Network': 'true',
   });
   res.end(body);
 }
@@ -186,8 +188,22 @@ function statSize(p) {
   }
 }
 
+// WebSocket 升级：扩展通过它接收命令。
+// 必须用 WebSocket 而不是 HTTP 轮询 —— Chrome/Edge 的扩展 Service Worker
+// 无法用 fetch 访问 127.0.0.1 的 HTTP 服务（浏览器本地网络策略会直接拒绝，
+// 连 companion 都收不到请求），而 WebSocket 不受该限制。
+const wsConnections = new Set();
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  if (process.env.NBC_DEBUG) {
+    process.stderr.write(
+      `[req] ${req.method} ${url.pathname} origin=${req.headers.origin || '-'} ` +
+      `prn=${req.headers['access-control-request-private-network'] || '-'} ` +
+      `host=${req.headers.host}
+`
+    );
+  }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -195,6 +211,10 @@ const server = http.createServer(async (req, res) => {
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       'Access-Control-Allow-Headers': '*',
       'Access-Control-Max-Age': '86400',
+      // Private Network Access：扩展访问 127.0.0.1 属于「本地网络」，
+      // 浏览器会发带 Access-Control-Request-Private-Network 的预检，
+      // 服务端必须显式回这个头，否则扩展侧 fetch 会直接 Failed to fetch。
+      'Access-Control-Allow-Private-Network': 'true',
     });
     res.end();
     return;
@@ -207,7 +227,9 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         name: 'netbrowserclaw-companion',
         version: '0.1.0',
-        extensionConnected: Date.now() - lastExtensionSeen < 10_000,
+        extensionConnected:
+          Date.now() - lastExtensionSeen < 10_000 || wsConnections.size > 0,
+        wsConnections: wsConnections.size,
         pendingCommands: pending.length,
         tools: {
           ffmpeg: toolConfig.ffmpegPath ? probeBinary(toolConfig.ffmpegPath).ok : false,
@@ -252,6 +274,7 @@ const server = http.createServer(async (req, res) => {
         }
       });
       outHeaders['Access-Control-Allow-Origin'] = '*';
+      outHeaders['Access-Control-Allow-Private-Network'] = 'true';
       // 不压缩，流式转发更稳。
       delete outHeaders['content-encoding'];
 
@@ -513,6 +536,53 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  if (url.pathname !== '/bridge') {
+    socket.destroy();
+    return;
+  }
+  const conn = upgradeToWebSocket(req, socket, head);
+  if (!conn) {
+    socket.destroy();
+    return;
+  }
+  wsConnections.add(conn);
+  lastExtensionSeen = Date.now();
+  if (process.env.NBC_DEBUG) process.stderr.write('[ws] 扩展已连接\n');
+
+  conn.on('message', (text) => {
+    lastExtensionSeen = Date.now();
+    let msg;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return;
+    }
+    // 扩展回传工具执行结果
+    if (msg.type === 'result') {
+      for (const r of msg.results || []) settle(r.id, r.result, r.error);
+      return;
+    }
+    // 扩展主动发来的工具请求
+    if (msg.type === 'request' && msg.tool) {
+      enqueue(msg.tool, msg.args || {}).catch(() => {});
+    }
+  });
+
+  conn.on('close', () => {
+    wsConnections.delete(conn);
+    if (process.env.NBC_DEBUG) process.stderr.write('[ws] 扩展已断开\n');
+  });
+
+  // 立刻把待执行命令推给它
+  if (pending.length) {
+    const cmd = pending.shift();
+    conn.send(JSON.stringify({ type: 'command', id: cmd.id, tool: cmd.tool, args: cmd.args }));
+  }
+});
+
+
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     process.stderr.write(
@@ -528,7 +598,7 @@ server.listen(PORT, HOST, () => {
   process.stderr.write(
     `NetBrowserClaw companion 已启动：http://${HOST}:${PORT}\n` +
     `  · /proxy        反向代理（扩展用 'relay' 传输时走这里）\n` +
-    `  · /bridge/poll  扩展轮询取命令\n` +
+    `  · /bridge      WebSocket（扩展接收命令的通道）\n` +
     `  · /health       健康检查\n`
   );
   if (START_MCP) startMcpStdio();

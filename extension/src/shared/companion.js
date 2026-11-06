@@ -24,11 +24,18 @@ export async function configuredUrl() {
   }
 }
 
-/** 探测地址是否为可用的 companion。 */
-export async function probe(url) {
+/**
+ * 探测地址是否为可用的 companion。
+ *
+ * 超时不能设得太短：实测在 Service Worker 里，
+ * AbortSignal.timeout(1500) 对 127.0.0.1 的请求会误报 TimeoutError
+ * （实际响应只要几毫秒），而 5000ms 正常。
+ * 这个坑很隐蔽 —— 表现为「companion 明明在跑，扩展却说连不上」。
+ */
+export async function probe(url, timeoutMs = 5000) {
   if (!url) return false;
   try {
-    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1500) });
+    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return false;
     const data = await res.json();
     return data?.name === 'netbrowserclaw-companion';
@@ -39,7 +46,9 @@ export async function probe(url) {
 
 /**
  * 找到可用的 companion 地址；找不到返回 null。
- * 带短缓存，避免每次调用都探测一遍。
+ *
+ * 候选端口**并行**探测：串行的话每个不存在的端口都要等一次超时，
+ * 5 个端口就是 20 秒起步。
  */
 export async function findCompanion({ force = false } = {}) {
   const now = Date.now();
@@ -51,14 +60,21 @@ export async function findCompanion({ force = false } = {}) {
     cache.at = now;
     return configured;
   }
-  for (const port of CANDIDATE_PORTS) {
-    const url = `http://127.0.0.1:${port}`;
-    if (await probe(url)) {
-      cache.url = url;
-      cache.at = now;
-      return url;
-    }
+
+  // 并行探测所有候选端口，取第一个成功的
+  const results = await Promise.all(
+    CANDIDATE_PORTS.map(async (port) => {
+      const url = `http://127.0.0.1:${port}`;
+      return (await probe(url)) ? url : null;
+    })
+  );
+  const found = results.find(Boolean);
+  if (found) {
+    cache.url = found;
+    cache.at = now;
+    return found;
   }
+
   cache.url = null;
   cache.at = now;
   return null;
@@ -79,7 +95,7 @@ export async function companionFetch(path, body, { method = 'POST', timeout = 30
       method,
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(timeout),
+      signal: AbortSignal.timeout(Math.max(timeout, 30_000)),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
