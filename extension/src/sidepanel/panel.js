@@ -359,9 +359,18 @@ async function send() {
   // 否则每次追加都会把已渲染的 Markdown 标签冲掉。
   const bubble = renderMessage('assistant', '');
   let acc = '';
+  let reasoningAcc = '';
   let rendered = '';
   const toolCards = new Map();
   let lastError = null;
+
+  // 思维链单独放一个可折叠区域，不与正式回答混在一起。
+  const reasoningBox = document.createElement('details');
+  reasoningBox.className = 'reasoning-box';
+  reasoningBox.hidden = true;
+  reasoningBox.innerHTML =
+    '<summary>思考过程</summary><div class="reasoning-body"></div>';
+  bubble.parentElement.insertBefore(reasoningBox, bubble);
 
   const pageCtx = await currentPageContext();
   const history = [...state.messages];
@@ -375,10 +384,10 @@ async function send() {
       scrollToBottom();
     },
     reasoning: (t) => {
-      // 思考模式的思维链：折叠展示，不进对话历史
-      acc += t;
-      bubble.textContent = acc;
-      bubble.classList.add('is-reasoning');
+      // 思考模式的思维链：单独折叠展示，不进对话历史
+      reasoningAcc += t;
+      reasoningBox.hidden = false;
+      reasoningBox.querySelector('.reasoning-body').textContent = reasoningAcc;
       scrollToBottom();
     },
     tool_start: (ev) => {
@@ -441,6 +450,12 @@ async function send() {
     rendered = renderMarkdown(acc);
     bubble.innerHTML = rendered;
     bubble.classList.remove('is-reasoning');
+    // 思维链也按 Markdown 渲染
+    if (reasoningAcc) {
+      reasoningBox.querySelector('.reasoning-body').innerHTML = renderMarkdown(reasoningAcc);
+    } else {
+      reasoningBox.remove();
+    }
     state.busy = false;
     state.controller = null;
     el.send.disabled = false;

@@ -29,6 +29,10 @@
 
 ![划词](docs/screenshot-selection.png)
 
+思考过程（折叠展示，不与正式回答混在一起）：
+
+![思考过程](docs/screenshot-reasoning.png)
+
 下载队列：
 
 ![队列](docs/screenshot-queue.png)
@@ -257,7 +261,7 @@ docs/               可行性评估 · 架构设计 · 开源借鉴 · 路线图
 ```bash
 node scripts/make-icons.mjs     # 重新生成图标
 node scripts/check-project.mjs  # 项目结构自检（manifest 引用 + 工具/handler 一致性）
-node scripts/test-agent.mjs     # agent 循环单元测试（不依赖浏览器与网络）— 37 项
+node scripts/test-agent.mjs     # agent 循环单元测试（不依赖浏览器与网络）— 40 项
 node scripts/verify-e2e.mjs     # 端到端验证（真实启动 Edge 并加载扩展）— 118 项
 node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS）— 23 项
 ```
@@ -271,7 +275,7 @@ node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS
 DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成可播放的视频），
 而不只是检查返回值。
 
-当前状态：**178/178 通过**。
+当前状态：**181/181 通过**。
 
 新增一个工具只要三步：
 

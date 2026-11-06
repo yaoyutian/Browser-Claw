@@ -54,8 +54,10 @@ function makeEmitter(onEvent) {
       const handler = onEvent[ev?.type];
       if (typeof handler !== 'function') return;
       try {
-        // 文本事件历史上传的是字符串，其余传整个事件对象
-        handler(ev.type === 'text' ? ev.text : ev);
+        // 文本类事件（text / reasoning）传字符串，其余传整个事件对象。
+        // 注意 reasoning 也必须传字符串 —— 传对象会被拼成 "[object Object]"。
+        const isTextLike = ev?.type === 'text' || ev?.type === 'reasoning';
+        handler(isTextLike ? ev.text ?? '' : ev);
       } catch (e) {
         console.warn('[nbc agent] onEvent 处理出错', e);
       }

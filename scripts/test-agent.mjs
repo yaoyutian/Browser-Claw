@@ -389,7 +389,34 @@ console.log('\n[9] 工具名映射（DeepSeek 等不允许点号）');
   srv2.close();
 }
 
-console.log('\n[10] 达到最大轮次时不崩溃');
+console.log('\n[10] 对象式 onEvent 的 reasoning 必须是字符串');
+{
+  // 回归测试：曾把整个事件对象传给 reasoning 处理器，
+  // 结果面板把对象拼进文本，出现成百上千个 "[object Object]"。
+  RESPONSES.length = 0;
+  RESPONSES.push({ reasoning: '思考片段A', text: '正式回答' });
+  const seen = [];
+  await runAgent({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    provider,
+    onEvent: {
+      text: (t) => seen.push(['text', t]),
+      reasoning: (t) => seen.push(['reasoning', t]),
+      done: (t) => seen.push(['done', t]),
+    },
+  });
+  const reasoningArg = seen.find((x) => x[0] === 'reasoning')?.[1];
+  const textArg = seen.find((x) => x[0] === 'text')?.[1];
+  check('reasoning 收到的是字符串', typeof reasoningArg === 'string',
+    typeof reasoningArg === 'string' ? reasoningArg : typeof reasoningArg);
+  check('reasoning 不含 [object Object]',
+    typeof reasoningArg === 'string' && !reasoningArg.includes('[object Object]'),
+    String(reasoningArg).slice(0, 40));
+  check('text 收到的也是字符串', typeof textArg === 'string',
+    typeof textArg === 'string' ? textArg : typeof textArg);
+}
+
+console.log('\n[11] 达到最大轮次时不崩溃');
 {
   // 模型一直要求调工具 → 触发 MAX_ROUNDS 上限
   RESPONSES.length = 0;
