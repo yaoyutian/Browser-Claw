@@ -996,6 +996,116 @@ export const handlers = {
     return list.slice(0, args.limit || 300);
   },
 
+  /**
+   * 用 yt-dlp 下载「页面」里的媒体。
+   *
+   * 适用场景：YouTube / Bilibili 这类站点，页面里的媒体是 blob: 或带签名的分片流，
+   * 没有可直接下载的完整文件 URL —— 只能交给 yt-dlp 解析。
+   */
+  async 'media.downloadPage'(args) {
+    const targetUrl = (args.url || '').trim();
+    if (!targetUrl) throw new ToolError('缺少 url 参数');
+    if (!/^https?:/.test(targetUrl)) {
+      throw new ToolError('只支持 http/https 链接', targetUrl);
+    }
+
+    const companion = await findCompanion();
+    if (!companion) {
+      throw new ToolError(
+        '需要本地 companion 才能用 yt-dlp 下载',
+        '请运行 node companion/server.mjs，并在设置里配置 yt-dlp 路径'
+      );
+    }
+
+    // 先问 companion 它的 yt-dlp 状态，没配就别白跑一趟
+    const cfg = await companionFetch('/config', null, { method: 'GET', timeout: 5000 });
+    const ytdlp = cfg?.data?.config?.ytdlpDetected;
+    if (!cfg.ok) {
+      throw new ToolError('本地中继无响应', cfg.error || '');
+    }
+    if (!ytdlp?.ok) {
+      throw new ToolError(
+        'companion 未配置可用的 yt-dlp',
+        '在扩展设置里填入 yt-dlp 可执行文件的完整路径（Windows 如 C:\\tools\\yt-dlp.exe），' +
+          '点「检测」确认后重试'
+      );
+    }
+
+    const res = await companionFetch(
+      '/download',
+      {
+        targetUrl,
+        filename: args.filename || '',
+        referer: args.referer || '',
+        audioOnly: args.audioOnly === true,
+        format: args.format || '',
+      },
+      { timeout: 10 * 60_000 }
+    );
+    if (!res.ok) {
+      throw new ToolError('yt-dlp 下载失败', res.detail || res.error || '');
+    }
+    const files = res.data?.files || [];
+    return {
+      ok: true,
+      mode: res.data?.mode || 'yt-dlp',
+      dir: res.data?.dir,
+      files,
+      count: files.length,
+      url: targetUrl,
+      hint: files.length
+        ? `已保存 ${files.length} 个文件到 ${res.data?.dir}`
+        : `已保存到 ${res.data?.dir}`,
+    };
+  },
+
+  /** 查询本地 companion 与其工具（yt-dlp / ffmpeg）的可用状态。 */
+  async 'media.capabilities'(args) {
+    // 字段始终齐全，AI 才能稳定读取
+    const base = {
+      companion: false,
+      url: '',
+      ffmpeg: false,
+      ffmpegVersion: '',
+      ytDlp: false,
+      ytDlpVersion: '',
+      downloadDir: '',
+      hint: '',
+    };
+
+    const companion = await findCompanion();
+    if (!companion) {
+      return {
+        ...base,
+        hint:
+          '未检测到本地 companion。yt-dlp / ffmpeg 相关功能需要它。' +
+          '启动方式：node companion/server.mjs',
+      };
+    }
+
+    const res = await companionFetch('/config', null, { method: 'GET', timeout: 5000 });
+    if (!res.ok) {
+      return { ...base, companion: true, url: companion, hint: `companion 无响应：${res.error || ''}` };
+    }
+
+    const c = res.data?.config || {};
+    return {
+      ...base,
+      companion: true,
+      url: companion,
+      ffmpeg: c.ffmpegDetected?.ok || false,
+      ffmpegVersion: c.ffmpegDetected?.version || '',
+      ytDlp: c.ytdlpDetected?.ok || false,
+      ytDlpVersion: c.ytdlpDetected?.version || '',
+      downloadDir: c.downloadDir || '',
+      hint:
+        c.ytdlpDetected?.ok
+          ? 'yt-dlp 可用 —— 下载 YouTube/Bilibili 等站点请用 media.downloadPage'
+          : '未配置 yt-dlp —— media.downloadPage 不可用；直链下载仍可用 media.download。' +
+            '可在设置里填 yt-dlp 路径后点「检测」。',
+    };
+  },
+
   async 'media.download'(args) {
     const urls = args.urls || [];
     if (!urls.length) throw new ToolError('没有要下载的 URL');

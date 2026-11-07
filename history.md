@@ -452,13 +452,13 @@ for f in extension/src/**/*.js companion/*.mjs scripts/*.mjs; do node --check "$
 | 体验与正确性 | 4 | #7、#8、#18、#19 |
 | 开发过程 | 2 | 字符串替换损坏、测试盲区 |
 
-**当前基线**：190 项自动化验证全通过
+**当前基线**：196 项自动化验证全通过
 
 ```
-结构自检        通过（36 个工具与 handler 双向一致）
+结构自检        通过（38 个工具与 handler 双向一致）
 agent 单元测试  48/48   ← 覆盖主链路
-E2E           118/118
-MCP 联动       24/24   ← 专属端口，与用户实例隔离
+E2E           125/125
+MCP 联动       23/23   ← 专属端口，与用户实例隔离
 ```
 
 ## 遗留问题
@@ -466,6 +466,9 @@ MCP 联动       24/24   ← 专属端口，与用户实例隔离
 | 问题 | 状态 |
 |---|---|
 | HLS/DASH 下载依赖 companion + ffmpeg | 已实现，companion 未运行时给出明确提示 |
+| YouTube/Bilibili 视频下载 | 已实现（`media.downloadPage` → companion → yt-dlp）；实测下载出 9.5MB / 634.7s 的 mp3 |
+| yt-dlp 需要 JS runtime | companion 自动探测 node/deno/bun 并传 `--js-runtimes`；都找不到时给出明确提示 |
+| yt-dlp 下载进度 | 目前是黑盒等待（下载完才返回），百分比未回传侧边栏 |
 | 表格翻页只识别常规分页控件 | 无限滚动已支持；无分页控件也不响应滚动的页面仍需手动 `page.scroll` |
 | 划词需要 MAIN world 探针 | 已实现（隔离世界读不到真实选区） |
 | 表格采集对虚拟滚动列表 | 每轮结果累积到独立集合，不依赖表格保留 —— 已覆盖 |

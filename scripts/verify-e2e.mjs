@@ -921,6 +921,32 @@ async function main() {
     directTest?.ok !== false || Boolean(directTest?.note),
     directTest?.note?.slice(0, 60) || '');
 
+  // --- 20. 下载能力（yt-dlp 链路）---------------------------------------
+  console.log('\n[19] media.capabilities / media.downloadPage —— 下载能力');
+  const caps = await call('media.capabilities', {});
+  check('media.capabilities 执行成功', caps.ok === true, caps.error || '');
+  check('返回了 companion 状态', typeof caps.data?.companion === 'boolean',
+    JSON.stringify(caps.data)?.slice(0, 80));
+  check('返回了 yt-dlp / ffmpeg 可用性',
+    typeof caps.data?.ytDlp === 'boolean' && typeof caps.data?.ffmpeg === 'boolean',
+    JSON.stringify({ ytDlp: caps.data?.ytDlp, ffmpeg: caps.data?.ffmpeg }));
+  check('给出了可操作提示', typeof caps.data?.hint === 'string' && caps.data.hint.length > 0,
+    (caps.data?.hint || '').slice(0, 60));
+
+  // companion 未配置 yt-dlp 时，downloadPage 要给出明确引导，而不是含糊报错
+  const dpage = await call('media.downloadPage', {
+    url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+  });
+  check('media.downloadPage 有明确结果', dpage.ok === true || dpage.ok === false, '');
+  if (!dpage.ok) {
+    check('未配置 yt-dlp 时给出配置指引',
+      String(dpage.error || '') + String(dpage.detail || '').includes('yt-dlp'),
+      String(dpage.error || '').slice(0, 60));
+    check('指引指向扩展设置而不是让用户敲命令行',
+      (String(dpage.detail || '') + String(dpage.error || '')).includes('设置'),
+      (String(dpage.detail || '')).slice(0, 80));
+  }
+
   console.log('\n面板控制台日志：');
   console.log(panel.logs.slice(-15).join('\n') || '（无）');
 }

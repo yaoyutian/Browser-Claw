@@ -53,6 +53,7 @@
 | 🎨 **修改网站样式** | `style.preset` `style.apply` `style.hide` | 深色模式、阅读模式、紧凑排版、全宽、隐藏图片；或注入任意 CSS（可限定作用域） |
 | 📑 **表格批量下载** | `table.docs` `table.download` | **自动翻页**收集表格里每一行每一列的文档链接，按「行标签_列标题」命名下载 |
 | ⬇️ **批量下载** | `media.list` `media.download` | 找出页面里的音视频/文档，带登录态 Cookie 与 Referer 批量下载；HLS/DASH 流交给 ffmpeg 合并 |
+| 🎬 **下载网页视频** | `media.downloadPage` | YouTube/Bilibili 等站点：把页面链接交给本地 yt-dlp 下载（支持只要音频） |
 | 📄 **导出文档** | `doc.export` | 直接生成 Markdown / Word(.docx) / HTML / TXT |
 | 🖱️ **网页交互** | `page.click` `page.fill` `page.scroll` `page.highlight` | 点击、填表、滚动；操作前可高亮目标让你确认 |
 | ✂️ **划词提问** | `page.selection` | 选中网页上的文字，侧边栏直接出现「就此提问」 |
@@ -189,6 +190,23 @@ tags: [clippings]
 点顶栏的 ⇩ 按钮，或说「**导出对话**」，整段对话（含每次工具调用的入参与结果）
 会存成 Markdown，适合存档或二次整理。
 
+#### 下载 YouTube / Bilibili 的视频
+
+这类站点的媒体是 blob: 地址或带签名的分片流，**普通下载工具拿不到完整文件**，
+只有 yt-dlp 能解析出真实地址。本项目把它接进来了：
+
+> 下载这个视频
+
+扩展会自动走 `media.downloadPage` → 本地 companion → yt-dlp。
+只要音频就说「下载音频」，会提取成 mp3。
+
+**前提**：设置里配好 yt-dlp 路径（点「检测」验证）。
+另外新版 yt-dlp 需要 **JS runtime**（Node.js / Deno / Bun 之一）来解 YouTube 的签名，
+companion 会自动探测本机并传入。
+
+> 想确认当前能不能用？直接问它「检查下载能力」，它会调 `media.capabilities`
+> 报告 yt-dlp / ffmpeg 的实际状态，而不是笼统地说「请自己去装」。
+
 #### 表格批量下载
 
 报表类页面上「每一行每一列都藏着一个 PDF 链接」时，直接说：
@@ -279,7 +297,7 @@ node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS
 DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成可播放的视频），
 而不只是检查返回值。
 
-当前状态：**190/190 通过**（48 + 118 + 24）。
+当前状态：**196/196 通过**（48 + 125 + 23）。
 
 新增一个工具只要三步：
 

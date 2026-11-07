@@ -15,7 +15,7 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { upgradeToWebSocket } from './ws-server.mjs';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import process from 'node:process';
@@ -64,6 +64,33 @@ function saveConfig() {
 }
 
 loadConfig();
+
+/**
+ * 探测本机可用的 JS runtime。
+ *
+ * 新版 yt-dlp 需要 JS runtime 才能解 YouTube 的签名（需要执行网页里的 JS）。
+ * 它只认 deno / node / bun 等少数几个，且不接受裸名字 —— 必须给绝对路径。
+ */
+function findJsRuntime() {
+  const candidates = [
+    { cmd: 'deno', hint: 'deno' },
+    { cmd: 'node', hint: 'node' },
+    { cmd: 'bun', hint: 'bun' },
+  ];
+  for (const c of candidates) {
+    try {
+      const r = spawnSync(c.cmd, ['--version'], { encoding: 'utf8', shell: false });
+      if (r.status === 0) {
+        // where 能拿到绝对路径
+        const w = spawnSync('where', [c.cmd], { encoding: 'utf8', shell: true });
+        const line = (w.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)[0];
+        const abs = line || c.cmd;
+        return `${c.hint}:${abs}`;
+      }
+    } catch { /* 继续试下一个 */ }
+  }
+  return '';
+}
 
 /**
  * 探测一个可执行文件是否可用。
@@ -459,7 +486,7 @@ const server = http.createServer(async (req, res) => {
 
     // --- 通用下载（优先用 yt-dlp，回退到原生 fetch） -------------------------
     if (url.pathname === '/download' && req.method === 'POST') {
-      const { targetUrl, filename, referer, cookie } = await readJson(req);
+      const { targetUrl, filename, referer, cookie, audioOnly, format } = await readJson(req);
       if (!targetUrl) {
         sendJson(res, 400, { error: '缺少 targetUrl' });
         return;
@@ -470,16 +497,55 @@ const server = http.createServer(async (req, res) => {
       if (toolConfig.ytdlpPath && probeBinary(toolConfig.ytdlpPath, '--version').ok) {
         const outName = (filename || 'download').replace(/[\\/:*?"<>|]/g, '_');
         const outTemplate = pathJoin(toolConfig.downloadDir, `${outName}.%(ext)s`);
-        const args = ['--no-playlist', '-o', outTemplate];
+        const args = ['--no-playlist', '--newline', '-o', outTemplate];
+
+        // 只要音频
+        if (audioOnly) {
+          args.push('-x', '--audio-format', 'mp3');
+        } else if (format) {
+          args.push('-f', format);
+        } else {
+          // 默认：最佳画质 + 最佳音质合并
+          args.push('-f', 'bv*+ba/b');
+        }
+
         if (referer) args.push('--referer', referer);
         if (cookie) args.push('--add-header', `Cookie:${cookie}`);
+
+        // 新版 yt-dlp 需要 JS runtime 才能解 YouTube 的签名。
+        // 自动探测本机的 node/deno/bun，找不到就明确提示，而不是让用户看一堆英文报错。
+        const jsRuntime = findJsRuntime();
+        if (jsRuntime) {
+          args.push('--js-runtimes', jsRuntime);
+        } else if (/youtube\.com|youtu\.be/i.test(targetUrl)) {
+          sendJson(res, 400, {
+            error: 'yt-dlp 缺少 JS runtime，无法解析 YouTube 签名',
+            detail:
+              '新版 yt-dlp 需要 Node.js / Deno / Bun 之一来执行网页脚本。' +
+              '本机未探测到，可在设置里安装 Node.js，或改用带 JS runtime 的 yt-dlp 版本。',
+          });
+          return;
+        }
+
         args.push(targetUrl);
 
         const proc = spawn(toolConfig.ytdlpPath, args, { windowsHide: true });
         let stderr = '';
+        let lastProgress = '';
         proc.stderr.on('data', (d) => {
           stderr += d.toString();
           if (stderr.length > 20000) stderr = stderr.slice(-20000);
+        });
+        proc.stdout.on('data', (d) => {
+          const line = d.toString();
+          // yt-dlp --newline 的进度行形如 "[download]  12.3% of ..."
+          const m = line.match(/\[download\]\s+([\d.]+)%/);
+          if (m && m[1] !== lastProgress) {
+            lastProgress = m[1];
+            if (process.env.NBC_DEBUG) {
+              process.stderr.write(`[ytdlp] ${m[1]}%\n`);
+            }
+          }
         });
         const code = await new Promise((resolve) => {
           proc.on('error', (e) => resolve({ error: e.message }));
@@ -496,7 +562,25 @@ const server = http.createServer(async (req, res) => {
           });
           return;
         }
-        sendJson(res, 200, { ok: true, dir: toolConfig.downloadDir, mode: 'yt-dlp' });
+        // 报告实际产出的文件（yt-dlp 的 %(ext)s 是我们猜不出来的）
+        let produced = [];
+        try {
+          produced = readdirSync(toolConfig.downloadDir)
+            .filter((f) => f.startsWith(outName))
+            .map((f) => {
+              const full = pathJoin(toolConfig.downloadDir, f);
+              let size = null;
+              try { size = statSync(full).size; } catch { /* ignore */ }
+              return { name: f, path: full, size };
+            });
+        } catch { /* ignore */ }
+        sendJson(res, 200, {
+          ok: true,
+          dir: toolConfig.downloadDir,
+          mode: 'yt-dlp',
+          files: produced,
+          count: produced.length,
+        });
         return;
       }
 
@@ -804,6 +888,25 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: 'browser_download_page',
+    description:
+      '用 yt-dlp 下载网页里的视频/音频（YouTube、Bilibili 等）。' +
+      '传页面链接。需要本地 companion 配置了 yt-dlp。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '视频页面链接' },
+        filename: { type: 'string' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'browser_download_capabilities',
+    description: '查询本地 companion 与 yt-dlp / ffmpeg 的可用状态。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'browser_list_tabs',
     description: '列出所有打开的网页标签页。',
     inputSchema: { type: 'object', properties: {} },
@@ -842,6 +945,8 @@ const MCP_TO_DISPATCH = {
   browser_archive_page: (a) => ['page.archive', { inlineImages: a.inlineImages, inlineCss: a.inlineCss }],
   browser_download_queue: (a) => ['download.queue', { action: a.action }],
   browser_export_chat: (a) => ['chat.export', { format: a.format }],
+  browser_download_page: (a) => ['media.downloadPage', { url: a.url, filename: a.filename }],
+  browser_download_capabilities: () => ['media.capabilities', {}],
   browser_list_tabs: () => ['tab.list', {}],
   browser_open_tab: (a) => ['tab.open', { url: a.url }],
 };

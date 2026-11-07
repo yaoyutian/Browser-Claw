@@ -270,12 +270,47 @@ export const TOOLS = [
     },
   },
   {
+    name: 'media.downloadPage',
+    description:
+      '用 yt-dlp 下载「网页」里的视频/音频（YouTube、Bilibili、抖音等）。' +
+      '传页面链接而不是媒体直链 —— 站点把媒体拆成带签名的分片流时，' +
+      '普通下载工具拿不到完整文件，只有 yt-dlp 能解析出真实地址。' +
+      '需要本地 companion 已运行并配置了 yt-dlp 路径；' +
+      '不确定是否可用时，先调用 media.capabilities 查询。',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '视频页面链接，如 https://www.youtube.com/watch?v=...' },
+        filename: { type: 'string', description: '保存的文件名（不含扩展名）' },
+        referer: { type: 'string', description: '可选的 Referer 头' },
+        audioOnly: {
+          type: 'boolean',
+          description: '只要音频时置 true（提取为 mp3）。适合下载歌曲/播客。',
+        },
+        format: {
+          type: 'string',
+          description: '可选的 yt-dlp 格式串，如 "bv*+ba/b"（默认）。留空用默认。',
+        },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'media.capabilities',
+    description:
+      '查询本地 companion 与其外部工具（yt-dlp / ffmpeg）的可用状态。' +
+      '当用户要下载视频、或某个下载工具报错时，先调用它，' +
+      '以便根据实际可用性给出建议，而不是笼统地说「请自己安装」。',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
     name: 'media.download',
     description:
-      '批量下载资源文件。可传 urls 数组（字符串或 {url, filename} 对象）。' +
+      '批量下载**直链**资源文件。可传 urls 数组（字符串或 {url, filename} 对象）。' +
       '会带上当前登录态的 Cookie 与 Referer，因此登录后才能访问的文件也能下载。' +
-      'HLS/DASH 播放清单（.m3u8/.mpd）会自动转交本地 companion 用 ffmpeg 合并成单个文件；' +
-      '此时需要 companion 已运行且配置了 ffmpeg 路径，否则会返回明确错误。',
+      'HLS/DASH 播放清单（.m3u8/.mpd）会自动转交本地 companion 用 ffmpeg 合并成单个文件。' +
+      '⚠ 仅适用于能直接拿到文件 URL 的场景。若页面里的媒体是 blob: 地址或带签名的分片流' +
+      '（YouTube、Bilibili、抖音等常见），请改用 media.downloadPage。',
     parameters: {
       type: 'object',
       properties: {

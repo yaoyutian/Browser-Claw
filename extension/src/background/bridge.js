@@ -12,6 +12,7 @@
 // 扩展没有连接 companion 时完全不影响正常使用（轮询失败静默重试）。
 
 import { handlers } from './handlers.js';
+import { findCompanion } from '../shared/companion.js';
 
 const POLL_TIMEOUT_MS = 30_000;
 const RECONNECT_DELAY = 1500;
@@ -25,52 +26,16 @@ let keepAliveTimer = null;
 // 独立 POST 偶发丢失（连接复用/休眠），带回机制保证结果不丢。
 let pendingResults = [];
 
-/** 候选 companion 地址。设置里配置的优先，其次常见端口。 */
-const CANDIDATE_PORTS = [8787, 8788, 8789, 8790, 8888];
-
-/** 读设置里配置的 companion 地址。 */
-async function configuredUrl() {
-  try {
-    const stored = await chrome.storage.local.get('nbc:settings');
-    const cfg = stored['nbc:settings'] || {};
-    // companionUrl 是桥接专用的配置项；relayUrl 是「本地中继」的地址 ——
-    // 两者指向同一个服务，设置面板只暴露了 relayUrl 的输入框，
-    // 所以这里两个都读，否则用户在设置里填的端口会被忽略。
-    const url = cfg.companionUrl || cfg.relayUrl || '';
-    return url.replace(/\/+$/, '');
-  } catch {
-    return '';
-  }
-}
-
 /**
  * 找到可用的 companion 地址。
  *
- * 探测要串行（并发探测多个端口在部分平台上会互相干扰），
- * 但每个不存在的端口要等一次连接失败 —— 所以超时不宜过长。
+ * 复用 shared/companion.js 的实现 —— 之前这里有一份重复代码，
+ * 两处的探测超时/并行策略跑偏过一次（bridge 用 3000ms 误超时，
+ * 而 SW 里本地请求需要 5000ms 才稳定）。
+ * 共用一份就不会再分叉。
  */
 async function findRelayUrl() {
-  const configured = await configuredUrl();
-  const candidates = [];
-  if (configured) candidates.push(configured);
-  for (const p of CANDIDATE_PORTS) candidates.push(`http://127.0.0.1:${p}`);
-
-  for (const url of candidates) {
-    if (await probeCompanion(url)) return url;
-  }
-  return null;
-}
-
-/** 探测地址是否为可用 companion。 */
-async function probeCompanion(url) {
-  try {
-    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(3000) });
-    if (!res.ok) return false;
-    const data = await res.json();
-    return data?.name === 'netbrowserclaw-companion';
-  } catch {
-    return false;
-  }
+  return findCompanion();
 }
 
 /** 执行一个工具（复用 handlers.js 中的实现）。 */

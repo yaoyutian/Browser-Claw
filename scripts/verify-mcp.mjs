@@ -226,8 +226,13 @@ async function main() {
   // 工具就会去操作用户的真实页面（实测发生过）。
   // 明确告诉测试实例：只连这个专属端口的 companion。
   // （bridge 每次轮询都会重读配置，下一轮就切过去了）
+  // 注意：要用 spread 合并，不能整个覆盖 —— nbc:settings 里还存着模型服务商配置。
   await sw
-    .evaluate(`chrome.storage.local.set({'nbc:settings': {companionUrl: 'http://127.0.0.1:${NBC_PORT}'}}).then(()=>true)`)
+    .evaluate(
+      `chrome.storage.local.get('nbc:settings').then(cur=>` +
+        `chrome.storage.local.set({'nbc:settings': { ...(cur['nbc:settings']||{}), ` +
+        `companionUrl: 'http://127.0.0.1:${NBC_PORT}' }}).then(()=>true))`
+    )
     .catch(() => null);
 
   const owner = assertOwnsCdpPort(CDP_PORT, profile);

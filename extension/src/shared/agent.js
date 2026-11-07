@@ -231,6 +231,7 @@ export function systemPrompt({ siteName, pageTitle }) {
     '- 读取网页正文、表格、图片、链接（page.read / page.tables / page.images / page.links）',
     '- 修改网站样式：深色模式、阅读模式、隐藏广告、注入自定义 CSS（style.*）',
     '- 批量下载页面中的音视频与文档（media.list / media.download / page.links）',
+    '- 下载 YouTube / Bilibili 等站点的视频（media.downloadPage，内部走本地 yt-dlp）',
     '- 把网页内容导出为 Markdown / Word / HTML / txt 文档（doc.export）',
     '- 点击、填写表单、滚动页面（page.click / page.fill / page.scroll）',
     '- 管理标签页与导航（tab.* / nav.back）',
@@ -242,6 +243,15 @@ export function systemPrompt({ siteName, pageTitle }) {
     '3. 批量下载前先用 page.links / media.list 列出候选项，把数量和文件名告诉用户。',
     '4. 工具报错时，读懂错误信息后调整参数重试一次；仍失败就如实说明，不要编造结果。',
     '5. 用中文回答，除非用户用其他语言提问。回答要具体、可执行，避免空话。',
+    '',
+    '关于视频下载（重要）：',
+    '- 页面里是 blob: 地址或带签名的分片流（YouTube、Bilibili、抖音等常见）时，' +
+      '普通下载工具拿不到完整文件，必须用 media.downloadPage（走本地 yt-dlp）。',
+    '- 动手前先调用 media.capabilities 查一下 yt-dlp / ffmpeg 是否可用，' +
+      '再根据实际结果给建议 —— 不要笼统地说「请你自己去装 yt-dlp」，' +
+      '工具链里已经有这条能力了。',
+    '- 若 yt-dlp 未配置，告诉用户在扩展设置里填 yt-dlp 路径（点「检测」可验证），' +
+      '而不是让他自己去敲命令行。',
     context ? `\n${context}` : '',
   ]
     .filter(Boolean)
