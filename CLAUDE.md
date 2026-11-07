@@ -112,4 +112,4 @@ node scripts/verify-e2e.mjs && \
 node scripts/verify-mcp.mjs
 ```
 
-全部通过再提交。当前基线：**186 项**（44 + 118 + 24）。
+全部通过再提交。当前基线：**190 项**（48 + 118 + 24）。

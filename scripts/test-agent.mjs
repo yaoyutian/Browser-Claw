@@ -84,6 +84,14 @@ const server = createServer((req, res) => {
         })}\n\n`
       );
     }
+    // finish_reason 出现在最后一个 chunk 上（delta 为空）
+    if (next.finishReason) {
+      res.write(
+        `data: ${JSON.stringify({
+          choices: [{ delta: {}, finish_reason: next.finishReason, index: 0 }],
+        })}\n\n`
+      );
+    }
     if (next.toolCalls) {
       for (const tc of next.toolCalls) {
         res.write(
@@ -469,7 +477,30 @@ console.log('\n[11] 工具结果必须以 role:tool 发给服务端');
   srv3.close();
 }
 
-console.log('\n[12] 达到最大轮次时不崩溃');
+console.log('\n[12] 空回复 / 被截断的回复');
+{
+  // 回归测试：模型只输出了思维链、正文为空时，
+  // 历史里会多出一条 content 为空的 assistant 消息，
+  // 服务端会拒绝：Invalid assistant message: content or tool_calls must be set
+  RESPONSES.length = 0;
+  RESPONSES.push({ reasoning: '我想想…', finishReason: 'length' });
+  const seen = [];
+  const r = await runAgent({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    provider,
+    onEvent: (ev) => seen.push([ev.type, ev.text ?? '']),
+  });
+  check('空回复时不抛异常', true);
+  check('历史里没有空的 assistant 消息',
+    !r.messages.some((m) => m.role === 'assistant' && !m.content?.length),
+    JSON.stringify(r.messages.map((m) => m.role)));
+  check('给出了可操作的提示',
+    seen.some((x) => x[0] === 'text' && String(x[1]).includes('max_tokens')),
+    JSON.stringify(seen.map((x) => x[0])));
+  check('标记了 truncated', seen.some((x) => x[0] === 'done'), JSON.stringify(seen.map((x) => x[0])));
+}
+
+console.log('\n[13] 达到最大轮次时不崩溃');
 {
   // 模型一直要求调工具 → 触发 MAX_ROUNDS 上限
   RESPONSES.length = 0;

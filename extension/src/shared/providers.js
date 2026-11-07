@@ -587,6 +587,8 @@ async function* streamOpenAI(provider, { messages, tools, signal }) {
 
   // 工具调用是增量拼接的，需要按 index 聚合。
   const toolAcc = new Map();
+  // finish_reason：'length' 表示输出被 max_tokens 截断
+  let finishReason = null;
   for await (const line of sseLines(res)) {
     const data = parseSseData(line);
     if (!data) continue;
@@ -594,6 +596,10 @@ async function* streamOpenAI(provider, { messages, tools, signal }) {
     if (data.error) throw new ToolError('模型返回错误', JSON.stringify(data.error).slice(0, 500));
     const choice = data.choices?.[0];
     const delta = choice?.delta;
+    // 结束原因在最后一个 chunk 上（此时 delta 可能为空）
+    if (choice?.finish_reason) {
+      finishReason = choice.finish_reason;
+    }
     if (!delta) continue;
     if (delta.content) yield { type: 'text', text: delta.content };
     // 思考模式下的思维链 —— 单独标记，便于 UI 以浅色/斜体展示
@@ -628,6 +634,7 @@ async function* streamOpenAI(provider, { messages, tools, signal }) {
       input,
     };
   }
+  if (finishReason) yield { type: 'finish', reason: finishReason };
 }
 
 async function* streamAnthropic(provider, { messages, tools, signal }) {

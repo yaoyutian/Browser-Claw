@@ -88,12 +88,16 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
   // 声明在循环外：达到最大轮次时循环外也要用到 assistantText。
   let assistantText = '';
   let reasoningText = '';
+  // 服务端的结束原因：'stop' 正常、'length' 表示输出被 max_tokens 截断
+  let finishReason = null;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     // 注意：这两个变量声明在循环外（见上方）——
     // 达到最大轮次时循环外也要用到 assistantText。
     assistantText = '';
     reasoningText = '';
+    // 服务端的结束原因：'stop' 正常、'length' 表示输出被 max_tokens 截断
+    finishReason = null;
     const pendingCalls = [];
 
     try {
@@ -107,6 +111,8 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
           emit({ type: 'reasoning', text: ev.text });
         } else if (ev.type === 'tool_call') {
           pendingCalls.push(ev);
+        } else if (ev.type === 'finish') {
+          finishReason = ev.reason;
         }
       }
     } catch (err) {
@@ -115,8 +121,37 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
     }
 
     if (!pendingCalls.length) {
-      history.push({ role: 'assistant', content: [Text(assistantText)] });
-      emit({ type: 'done', text: assistantText, rounds: round + 1 });
+      // 模型可能只输出了思维链、正文为空（例如思考模式 + max_tokens 耗尽）。
+      // 这种**空的 assistant 消息**发回服务端会被拒：
+      //   Invalid assistant message: content or tool_calls must be set
+      // 所以正文为空时干脆不入历史。
+      if (assistantText.trim()) {
+        history.push({ role: 'assistant', content: [Text(assistantText)] });
+      }
+      // 给出可操作的提示，而不是让用户面对一句没有内容的话。
+      if (!assistantText.trim()) {
+        emit({
+          type: 'text',
+          text:
+            finishReason === 'length'
+              ? '\n_（模型输出被 max_tokens 截断，未产生正文。可在设置里调大「最大输出 tokens」，' +
+                '或在思考模式里选择「关闭」以节省 token。）_'
+              : '\n_（模型没有返回内容。可尝试换个模型，或检查 API Key 权限。）_',
+        });
+      } else if (finishReason === 'length') {
+        emit({
+          type: 'text',
+          text:
+            '\n_（输出被 max_tokens 截断，内容可能不完整。可在设置里调大「最大输出 tokens」。）_',
+        });
+      }
+      emit({
+        type: 'done',
+        text: assistantText,
+        rounds: round + 1,
+        truncated: finishReason === 'length',
+        empty: !assistantText.trim(),
+      });
       return { messages: history, toolCalls };
     }
 
