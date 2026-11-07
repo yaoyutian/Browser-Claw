@@ -416,7 +416,60 @@ console.log('\n[10] 对象式 onEvent 的 reasoning 必须是字符串');
     typeof textArg === 'string' ? textArg : typeof textArg);
 }
 
-console.log('\n[11] 达到最大轮次时不崩溃');
+console.log('\n[11] 工具结果必须以 role:tool 发给服务端');
+{
+  // 回归测试：内部协议把工具结果放在 user 消息里（Anthropic 风格），
+  // 转换器若按 role 判断就会把它整个丢掉，服务端会报：
+  //   An assistant message with 'tool_calls' must be followed by tool messages
+  const bodies = [];
+  const srv3 = createServer((req, res) => {
+    let b = '';
+    req.on('data', (c) => (b += c));
+    req.on('end', () => {
+      bodies.push(JSON.parse(b || '{}'));
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      if (bodies.length === 1) {
+        res.write(
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function",' +
+            '"function":{"name":"page_read","arguments":"{}"}}]},"index":0}]}\n\n'
+        );
+      } else {
+        res.write('data: {"choices":[{"delta":{"content":"完成"},"index":0}]}\n\n');
+      }
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((r) => srv3.listen(8896, '127.0.0.1', r));
+
+  globalThis.chrome.runtime.sendMessage = async (msg) => {
+    if (msg?.type === 'nbc:tool') return { ok: true, data: { ok: true } };
+    return { ok: true };
+  };
+
+  await runAgent({
+    messages: [{ role: 'user', content: [{ type: 'text', text: '读页面' }] }],
+    provider: { ...provider, baseUrl: 'http://127.0.0.1:8896/v1' },
+    onEvent: () => {},
+    enabledTools: [{ name: 'page.read', description: 'x', parameters: { type: 'object' } }],
+  });
+
+  const second = bodies[1]?.messages || [];
+  const asst = second.find((m) => m.role === 'assistant' && m.tool_calls?.length);
+  const toolMsg = second.find((m) => m.role === 'tool');
+  check('第二次请求带 assistant(tool_calls)', Boolean(asst), JSON.stringify(second.map((m) => m.role)));
+  check('第二次请求带 role:tool 消息', Boolean(toolMsg), JSON.stringify(second.map((m) => m.role)));
+  check('tool_call_id 与 tool_calls 对应',
+    toolMsg?.tool_call_id === asst?.tool_calls?.[0]?.id,
+    `${toolMsg?.tool_call_id} vs ${asst?.tool_calls?.[0]?.id}`);
+  check('工具名已转为下划线形式',
+    asst?.tool_calls?.[0]?.function?.name === 'page_read',
+    asst?.tool_calls?.[0]?.function?.name);
+
+  srv3.close();
+}
+
+console.log('\n[12] 达到最大轮次时不崩溃');
 {
   // 模型一直要求调工具 → 触发 MAX_ROUNDS 上限
   RESPONSES.length = 0;

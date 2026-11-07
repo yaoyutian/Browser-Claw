@@ -227,8 +227,10 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         name: 'netbrowserclaw-companion',
         version: '0.1.0',
+        // 长轮询每 20 秒才回来一次，存活窗口必须比这个间隔大，
+        // 否则 health 会时真时假，依赖它的测试会不稳定。
         extensionConnected:
-          Date.now() - lastExtensionSeen < 10_000 || wsConnections.size > 0,
+          Date.now() - lastExtensionSeen < 30_000 || wsConnections.size > 0,
         wsConnections: wsConnections.size,
         pendingCommands: pending.length,
         tools: {
@@ -307,12 +309,13 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 200, { commands: [cmd] });
         return;
       }
-      // 短暂长轮询，最多 20 秒，减少空转。
+      // 短暂长轮询，最多 8 秒。
+      // 不用 20 秒是为了让扩展在配置变更后能较快切换到新的 companion 地址。
       const timeout = setTimeout(() => {
         const idx = waiters.indexOf(handler);
         if (idx >= 0) waiters.splice(idx, 1);
         if (!res.writableEnded) sendJson(res, 200, { commands: [] });
-      }, 20_000);
+      }, 8_000);
       const handler = (cmd) => {
         clearTimeout(timeout);
         if (!res.writableEnded) sendJson(res, 200, { commands: [cmd] });

@@ -33,7 +33,11 @@ async function configuredUrl() {
   try {
     const stored = await chrome.storage.local.get('nbc:settings');
     const cfg = stored['nbc:settings'] || {};
-    return (cfg.companionUrl || '').replace(/\/+$/, '');
+    // companionUrl 是桥接专用的配置项；relayUrl 是「本地中继」的地址 ——
+    // 两者指向同一个服务，设置面板只暴露了 relayUrl 的输入框，
+    // 所以这里两个都读，否则用户在设置里填的端口会被忽略。
+    const url = cfg.companionUrl || cfg.relayUrl || '';
+    return url.replace(/\/+$/, '');
   } catch {
     return '';
   }

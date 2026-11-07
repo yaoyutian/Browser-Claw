@@ -748,6 +748,10 @@
             // 隔离世界读不到真实选区，返回最近一次由 MAIN world 探针上报的值。
             sendResponse({ ok: true, data: getSelectionInfo() });
             break;
+          case 'nbc:ping':
+            // 探活：后台用它判断哪些标签页已有内容脚本
+            sendResponse({ ok: true, data: { pong: true } });
+            break;
           case 'nbc:meta':
             sendResponse({ ok: true, data: collectMeta() });
             break;

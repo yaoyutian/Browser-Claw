@@ -40,6 +40,35 @@ function isStreamManifest(url) {
 }
 
 /** 向内容脚本发指令；脚本未注入时先用 chrome.scripting 兜底注入。 */
+/** 探测标签页里是否已有内容脚本（短超时，只用于探活）。 */
+async function pingContent(tabId) {
+  return Promise.race([
+    chrome.tabs
+      .sendMessage(tabId, { type: 'nbc:ping' })
+      .then((r) => !!r?.ok)
+      .catch(() => false),
+    new Promise((r) => setTimeout(() => r(false), 1200)),
+  ]);
+}
+
+/** 向标签页注入内容脚本。 */
+async function injectContentScripts(tabId) {
+  await chrome.scripting
+    .executeScript({
+      target: { tabId },
+      files: [
+        'src/content/media.js',
+        'src/content/extractor.js',
+        'src/content/style-agent.js',
+        'src/content/archiver.js',
+        'src/content/content.js',
+      ],
+    })
+    .catch((e) => {
+      throw new ToolError('无法注入内容脚本', e?.message || String(e));
+    });
+}
+
 async function sendToContent(tabId, message) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   const url = tab?.url || '';
@@ -49,22 +78,20 @@ async function sendToContent(tabId, message) {
     throw new ToolError('当前页面不允许扩展操作', `页面协议不支持: ${url.slice(0, 80)}`);
   }
 
-  let res = await chrome.tabs.sendMessage(tabId, message).catch(() => null);
-  if (!res) {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: [
-        'src/content/media.js',
-        'src/content/extractor.js',
-        'src/content/style-agent.js',
-        'src/content/archiver.js',
-        'src/content/content.js',
-      ],
-    }).catch((e) => {
-      throw new ToolError('无法注入内容脚本', e?.message || String(e));
-    });
-    res = await chrome.tabs.sendMessage(tabId, message).catch(() => null);
+  // 先探活，再发真实指令。
+  // 探活必须有超时 —— 目标页没有内容脚本时 sendMessage 可能既不 resolve
+  // 也不 reject，工具会永远挂着。
+  // 但真实指令**不能**套超时：分页采集、整页归档这类操作合法耗时几十秒，
+  // 超时后会误判为「无响应」而再次注入并发起第二次并发执行，
+  // 两个采集互相抢分页控件，结果只拿得到最后一页（实测踩过）。
+  if (!(await pingContent(tabId))) {
+    await injectContentScripts(tabId);
+    if (!(await pingContent(tabId))) {
+      throw new ToolError('无法注入内容脚本', '页面可能禁止扩展注入（如商店页、PDF 查看器）');
+    }
   }
+
+  const res = await chrome.tabs.sendMessage(tabId, message).catch(() => null);
   if (!res) throw new ToolError('内容脚本无响应', '页面可能正在跳转，请稍后重试');
   if (!res.ok) throw new ToolError(res.error || '内容脚本执行失败', res.stack);
   return res.data;
@@ -84,9 +111,39 @@ async function getTab(tabId) {
     throw new ToolError(`找不到标签页 (tabId=${tabId})`, '该标签页可能已被关闭');
   }
   // 回落时排除扩展自身页面，否则会对着侧边栏/设置页操作。
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const usable = tabs.filter((t) => /^https?:|^file:/.test(t.url || ''));
-  return usable[0] || tabs[0] || null;
+  const isUsable = (t) => /^https?:|^file:/.test(t.url || '');
+
+  // 1) 当前窗口的活动标签页
+  const active = await chrome.tabs.query({ active: true, currentWindow: true });
+  const activeUsable = active.filter(isUsable);
+  if (activeUsable.length) return activeUsable[0];
+
+  // 2) 当前窗口的其他网页标签
+  const current = await chrome.tabs.query({ currentWindow: true });
+  const currentUsable = current.filter(isUsable);
+  if (currentUsable.length) return currentUsable[0];
+
+  // 3) 所有窗口里最近活动的网页标签
+  //    侧边栏是扩展自己的页面，会占据「活动标签」的位置，
+  //    这时必须跨窗口找一个真正的网页，否则工具会对着扩展页空转。
+  const all = await chrome.tabs.query({});
+  const allUsable = all.filter(isUsable);
+  if (allUsable.length) {
+    allUsable.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+    // 优先选一个**已有内容脚本**的标签页 —— 在 about:blank 之类的页面上
+    // 调工具会因收不到响应而超时。
+    for (const t of allUsable) {
+      const alive = await Promise.race([
+        chrome.tabs.sendMessage(t.id, { type: 'nbc:ping' }).catch(() => null),
+        new Promise((r) => setTimeout(() => r(null), 800)),
+      ]);
+      if (alive) return t;
+    }
+    return allUsable[0];
+  }
+
+  // 4) 实在没有网页，返回扩展页（后续会因协议不匹配而报错，但至少不是空）
+  return active[0] || current[0] || null;
 }
 
 // ---------------------------------------------------------------------------

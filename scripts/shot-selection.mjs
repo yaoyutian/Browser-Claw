@@ -5,6 +5,7 @@
 // 产物：docs/screenshot-selection.png
 
 import { spawn } from 'node:child_process';
+import { killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync } from './_browser.mjs';
 import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -54,10 +55,11 @@ const edge = spawn(
   ],
   { stdio: 'ignore' }
 );
-const cleanup = () => {
-  for (const p of [edge, webServer]) { try { p.kill('SIGKILL'); } catch {} }
+const cleanup = async () => {
+  for (const p of [edge, webServer]) killTree(p.pid);
+  await cleanupStrayTestBrowsersAsync();
 };
-process.on('exit', cleanup);
+process.on('exit', () => { cleanupStrayTestBrowsers(); });
 
 function conn(url) {
   const ws = new WebSocket(url);
@@ -180,5 +182,5 @@ const out = join(ROOT, 'docs', DARK ? 'screenshot-selection-dark.png' : 'screens
 writeFileSync(out, Buffer.from(shot.data, 'base64'));
 console.log('截图已保存:', out);
 
-cleanup();
+await cleanup();
 process.exit(0);

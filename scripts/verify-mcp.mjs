@@ -5,6 +5,7 @@
 // 用法：node scripts/verify-mcp.mjs
 
 import { spawn, spawnSync } from 'node:child_process';
+import { killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync, assertOwnsCdpPort } from './_browser.mjs';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -16,7 +17,10 @@ const ROOT = join(__dirname, '..');
 const EXT = join(ROOT, 'extension');
 const CDP_PORT = 9445;
 const WEB_PORT = 8902;
-const NBC_PORT = 8788;
+// 用一个**不在扩展默认候选端口列表里**的专属端口。
+// 否则用户自己浏览器里装的扩展也会来轮询这个 companion，
+// MCP 命令就会被用户的浏览器抢走 —— 在他的真实页面上执行工具（实测发生过）。
+const NBC_PORT = 8791;
 
 const EDGE_CANDIDATES = [
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
@@ -73,6 +77,9 @@ function findFfmpeg() {
 
 const FFMPEG = findFfmpeg();
 
+// 清理残留浏览器进程，避免上次中断留下的进程干扰本次测试
+await import('./_cleanup.mjs');
+
 const browserProc = spawn(browser, [
   `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
   `--load-extension=${EXT}`, `--disable-extensions-except=${EXT}`,
@@ -85,11 +92,20 @@ const companion = spawn('node', [join(ROOT, 'companion', 'server.mjs'), '--mcp']
 });
 companion.stderr.on('data', (d) => process.stderr.write('[companion] ' + d));
 
-const cleanup = () => {
-  for (const p of [browserProc, webServer, companion]) { try { p.kill('SIGKILL'); } catch {} }
+// companion 启动失败（端口被占用等）时给出明确原因，而不是后续的 ECONNRESET。
+let companionFailed = null;
+companion.on('exit', (code) => {
+  if (code !== 0 && code !== null) {
+    companionFailed = `companion 退出码 ${code}`;
+  }
+});
+
+const cleanup = async () => {
+  for (const p of [browserProc, webServer, companion]) killTree(p.pid);
+  await cleanupStrayTestBrowsersAsync();
   for (const d of [profile, webRoot]) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
 };
-process.on('exit', cleanup);
+process.on('exit', () => { cleanupStrayTestBrowsers(); });
 
 const httpJson = async (p) => (await fetch(`http://127.0.0.1:${CDP_PORT}${p}`)).json();
 
@@ -204,21 +220,69 @@ async function main() {
   const sw = connect(swTarget.webSocketDebuggerUrl);
   await sw.ready;
   await sw.send('Runtime.enable');
+
+  // ⚠ 安全闸门：确认占用调试端口的进程确实是**我们这次启动的实例**。
+  // 否则扩展可能跑在用户自己开着远程调试的浏览器里，
+  // 工具就会去操作用户的真实页面（实测发生过）。
+  // 明确告诉测试实例：只连这个专属端口的 companion。
+  // （bridge 每次轮询都会重读配置，下一轮就切过去了）
+  await sw
+    .evaluate(`chrome.storage.local.set({'nbc:settings': {companionUrl: 'http://127.0.0.1:${NBC_PORT}'}}).then(()=>true)`)
+    .catch(() => null);
+
+  const owner = assertOwnsCdpPort(CDP_PORT, profile);
+  if (!owner.ok) {
+    console.error(
+      `\n✗ 调试端口 ${CDP_PORT} 不是本次测试的浏览器实例（${owner.cmd}）。` +
+        '\n  为避免在你的真实页面上执行工具，测试已中止。' +
+        '\n  请关掉占用该端口的浏览器后重试。'
+    );
+    process.exit(1);
+  }
+
   // Service Worker 的执行上下文在 attach 后需要一点时间才可求值，
   // 否则 Runtime.evaluate 会报 "chrome is not defined"。
   await waitForChromeApi(sw);
   await sw.evaluate(`chrome.tabs.create({url:'http://127.0.0.1:${WEB_PORT}/p.html'}).then(t=>t.id)`);
   await sleep(2500);
 
+  // 等待内容脚本注入就绪。
+  // Service Worker 起来 ≠ 内容脚本已注入到页面 —— 后者才是工具能执行的前提。
+  // 内容脚本没就绪时，chrome.tabs.sendMessage 找不到接收者，工具会超时。
+  let contentReady = false;
+  for (let i = 0; i < 40 && !contentReady; i++) {
+    contentReady = await sw
+      .evaluate(`(async()=>{
+        try{
+          const tabs = await chrome.tabs.query({url:'http://127.0.0.1:${WEB_PORT}/*'});
+          if(!tabs.length) return false;
+          const r = await chrome.tabs.sendMessage(tabs[0].id, {type:'nbc:selection:current'});
+          return !!r;
+        }catch(e){ return false; }
+      })()`)
+      .catch(() => false);
+    if (!contentReady) await sleep(500);
+  }
+  check('内容脚本已注入', contentReady);
+
   // 3. 扩展连接 companion（bridge 轮询）
   console.log('\n[3] 扩展 ↔ companion 桥接');
   let connected = false;
-  for (let i = 0; i < 30 && !connected; i++) {
-    const h = await (await fetch(`http://127.0.0.1:${NBC_PORT}/health`)).json();
-    connected = h.extensionConnected;
+  for (let i = 0; i < 60 && !connected; i++) {
+    if (companionFailed) break;
+    try {
+      const h = await (await fetch(`http://127.0.0.1:${NBC_PORT}/health`)).json();
+      connected = h.extensionConnected;
+    } catch (e) {
+      if (companionFailed) break;
+    }
     if (!connected) await sleep(1000);
   }
-  check('扩展已连上 companion', connected);
+  check(
+    '扩展已连上 companion',
+    connected,
+    companionFailed ? `${companionFailed}（端口 ${NBC_PORT} 可能被占用）` : ''
+  );
 
   // 4. MCP → 桥 → 扩展 → 浏览器 真实执行
   console.log('\n[4] MCP 调用真实浏览器');
@@ -350,6 +414,6 @@ main()
       }
     }
     await sleep(300);
-    cleanup();
+    await cleanup();
     process.exit(fail ? 1 : 0);
   });

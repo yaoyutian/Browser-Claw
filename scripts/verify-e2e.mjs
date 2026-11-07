@@ -8,6 +8,7 @@
 // 它会真实地：加载扩展 → 打开测试页 → 调工具 → 检查 DOM/文件系统结果。
 
 import { spawn, spawnSync } from 'node:child_process';
+import { killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync, assertOwnsCdpPort } from './_browser.mjs';
 import {
   mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, readFileSync,
 } from 'node:fs';
@@ -33,6 +34,9 @@ if (!browser) {
   console.error('未找到 Edge/Chrome 可执行文件');
   process.exit(1);
 }
+
+// 清理残留浏览器进程，避免上次中断留下的进程干扰本次测试
+await import('./_cleanup.mjs');
 
 const profile = mkdtempSync(join(tmpdir(), 'nbc-verify-'));
 const webRoot = mkdtempSync(join(tmpdir(), 'nbc-web-'));
@@ -237,14 +241,15 @@ const proc = spawn(
   { stdio: 'ignore', detached: false }
 );
 
-const cleanup = () => {
-  try { proc.kill('SIGKILL'); } catch {}
-  try { webServer.kill('SIGKILL'); } catch {}
+const cleanup = async () => {
+  killTree(proc.pid);
+  await cleanupStrayTestBrowsersAsync();
+  killTree(webServer.pid);
   try { rmSync(profile, { recursive: true, force: true }); } catch {}
   try { rmSync(webRoot, { recursive: true, force: true }); } catch {}
 };
-process.on('exit', cleanup);
-process.on('SIGINT', () => { cleanup(); process.exit(1); });
+process.on('exit', () => { cleanupStrayTestBrowsers(); });
+process.on('SIGINT', () => { cleanupStrayTestBrowsers(); process.exit(1); });
 
 const httpJson = async (path) => (await fetch(`http://127.0.0.1:${PORT}${path}`)).json();
 
@@ -364,6 +369,20 @@ async function main() {
   await sw.ready;
   await sw.send('Runtime.enable');
   await waitForChromeApi(sw);
+
+  // ⚠ 安全闸门：确认占用调试端口的进程确实是**我们这次启动的实例**。
+  // 否则扩展可能跑在用户自己开着远程调试的浏览器里，
+  // 工具就会去操作用户的真实页面（实测发生过）。
+  const owner = assertOwnsCdpPort(PORT, profile);
+  if (!owner.ok) {
+    console.error(
+      `\n✗ 调试端口 ${PORT} 不是本次测试的浏览器实例（${owner.cmd}）。` +
+        '\n  为避免在你的真实页面上执行工具，测试已中止。' +
+        '\n  请关掉占用该端口的浏览器后重试。'
+    );
+    process.exit(1);
+  }
+
   await sw.evaluate(`chrome.tabs.create({url:'chrome-extension://${extId}/src/sidepanel/panel.html'}).then(t=>t.id)`);
   await sleep(2000);
 
@@ -926,6 +945,6 @@ main()
       }
     }
     await sleep(300);
-    cleanup();
+    await cleanup();
     process.exit(fail ? 1 : 0);
   });

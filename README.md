@@ -258,6 +258,10 @@ docs/               可行性评估 · 架构设计 · 开源借鉴 · 路线图
 
 ## 开发与验证
 
+> ⚠️ **测试脚本不会影响你正在用的浏览器。** 每个脚本都用自己的临时 profile
+> 启动独立实例，结束时按 PID 精确清理；用户默认 profile 的浏览器进程永不触碰。
+> 开发约定见 [CLAUDE.md](CLAUDE.md)。
+
 ```bash
 node scripts/make-icons.mjs     # 重新生成图标
 node scripts/check-project.mjs  # 项目结构自检（manifest 引用 + 工具/handler 一致性）
@@ -275,7 +279,7 @@ node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS
 DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成可播放的视频），
 而不只是检查返回值。
 
-当前状态：**181/181 通过**。
+当前状态：**186/186 通过**（44 + 118 + 24）。
 
 新增一个工具只要三步：
 

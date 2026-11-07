@@ -282,10 +282,14 @@ function blocksOf(msg) {
   return msg.content || [];
 }
 
-function toOpenAIMessages(messages) {
+function toOpenAIMessages(messages, nameMap) {
   const out = [];
   for (const msg of messages) {
     const blocks = blocksOf(msg);
+
+    // 工具结果先处理 —— 内部协议把工具结果放在 user 消息里（Anthropic 风格），
+    // 不能按 role 判断，否则会被静默丢弃：
+    //   An assistant message with 'tool_calls' must be followed by tool messages
     if (msg.role === 'system') {
       const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
       if (text) out.push({ role: 'system', content: text });
@@ -301,25 +305,31 @@ function toOpenAIMessages(messages) {
         .map((b) => ({
           id: b.id,
           type: 'function',
-          function: { name: b.name, arguments: JSON.stringify(b.input || {}) },
+          function: {
+            // 用服务端名（点号已换成下划线），与 tools 定义保持一致。
+            // 否则模型看到定义叫 page_read、却回调查询 page.read，服务端会报错。
+            name: nameMap?.toRemote?.get(b.name) || b.name,
+            arguments: JSON.stringify(b.input || {}),
+          },
         }));
       const entry = { role: 'assistant', content: text || null };
       if (toolCalls.length) entry.tool_calls = toolCalls;
       out.push(entry);
       continue;
     }
-    if (msg.role === 'tool') {
-      const results = blocks.filter((b) => b.type === 'tool_result');
-      for (const r of results) {
-        out.push({
-          role: 'tool',
-          tool_call_id: r.tool_use_id,
-          content: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
-        });
-      }
-      continue;
+
+    // 工具结果 → 独立的 tool 消息（OpenAI 协议要求紧跟在带 tool_calls 的 assistant 之后）
+    const toolResults = blocks.filter((b) => b.type === 'tool_result');
+    for (const r of toolResults) {
+      out.push({
+        role: 'tool',
+        tool_call_id: r.tool_use_id,
+        content: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
+      });
     }
-    // user
+    if (msg.role === 'tool') continue;
+
+    // user（纯文本/图片部分）
     const parts = [];
     for (const b of blocks) {
       if (b.type === 'text') parts.push({ type: 'text', text: b.text });
@@ -357,16 +367,16 @@ function toAnthropicMessages(messages) {
       if (content.length) out.push({ role: 'assistant', content });
       continue;
     }
-    if (msg.role === 'tool') {
-      const content = blocks
-        .filter((b) => b.type === 'tool_result')
-        .map((b) => ({
-          type: 'tool_result',
-          tool_use_id: b.tool_use_id,
-          content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content),
-          ...(b.is_error ? { is_error: true } : {}),
-        }));
-      if (content.length) out.push({ role: 'user', content });
+    // 工具结果 —— 不按 role 判断（内部协议放在 user 消息里）
+    const toolResults = blocks.filter((b) => b.type === 'tool_result');
+    if (toolResults.length) {
+      const content = toolResults.map((b) => ({
+        type: 'tool_result',
+        tool_use_id: b.tool_use_id,
+        content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content),
+        ...(b.is_error ? { is_error: true } : {}),
+      }));
+      out.push({ role: 'user', content });
       continue;
     }
     const content = blocks.map((b) => {
@@ -399,16 +409,16 @@ function toGeminiContents(messages) {
       if (parts.length) contents.push({ role: 'model', parts });
       continue;
     }
-    if (msg.role === 'tool') {
-      const parts = blocks
-        .filter((b) => b.type === 'tool_result')
-        .map((b) => ({
-          functionResponse: {
-            name: b.tool_use_id,
-            response: { content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content) },
-          },
-        }));
-      if (parts.length) contents.push({ role: 'user', parts });
+    // 工具结果 —— 不按 role 判断（内部协议放在 user 消息里）
+    const toolResults = blocks.filter((b) => b.type === 'tool_result');
+    if (toolResults.length) {
+      const parts = toolResults.map((b) => ({
+        functionResponse: {
+          name: b.tool_use_id,
+          response: { content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content) },
+        },
+      }));
+      contents.push({ role: 'user', parts });
       continue;
     }
     const parts = [];
@@ -542,15 +552,16 @@ function parseSseData(line) {
 // ---------------------------------------------------------------------------
 
 async function* streamOpenAI(provider, { messages, tools, signal }) {
+  // 先建工具名映射：消息里的工具调用记录与工具定义要用同一个名字。
+  const nameMap = buildToolNameMap(tools || []);
   const payload = {
     model: provider.model,
-    messages: toOpenAIMessages(messages),
+    messages: toOpenAIMessages(messages, nameMap),
     stream: true,
     stream_options: { include_usage: true },
   };
   if (provider.temperature !== undefined) payload.temperature = provider.temperature;
   if (provider.maxTokens) payload.max_tokens = provider.maxTokens;
-  const nameMap = buildToolNameMap(tools || []);
   const t = toProviderTools('openai', tools, nameMap.toRemote);
   if (t) payload.tools = t;
 
@@ -620,7 +631,8 @@ async function* streamOpenAI(provider, { messages, tools, signal }) {
 }
 
 async function* streamAnthropic(provider, { messages, tools, signal }) {
-  const { system, messages: msgs } = toAnthropicMessages(messages);
+  const nameMap = buildToolNameMap(tools || []);
+  const { system, messages: msgs } = toAnthropicMessages(messages, nameMap);
   const payload = {
     model: provider.model,
     messages: msgs,
@@ -629,7 +641,6 @@ async function* streamAnthropic(provider, { messages, tools, signal }) {
   };
   if (provider.temperature !== undefined) payload.temperature = provider.temperature;
   if (system) payload.system = system;
-  const nameMap = buildToolNameMap(tools || []);
   const t = toProviderTools('anthropic', tools, nameMap.toRemote);
   if (t) payload.tools = t;
 
@@ -690,14 +701,14 @@ async function* streamAnthropic(provider, { messages, tools, signal }) {
 }
 
 async function* streamGemini(provider, { messages, tools, signal }) {
-  const { systemInstruction, contents } = toGeminiContents(messages);
+  const nameMap = buildToolNameMap(tools || []);
+  const { systemInstruction, contents } = toGeminiContents(messages, nameMap);
   const payload = {
     contents,
     generationConfig: { maxOutputTokens: provider.maxTokens || 8192 },
   };
   if (provider.temperature !== undefined) payload.generationConfig.temperature = provider.temperature;
   if (systemInstruction) payload.systemInstruction = systemInstruction;
-  const nameMap = buildToolNameMap(tools || []);
   const t = toProviderTools('gemini', tools, nameMap.toRemote);
   if (t) payload.tools = t;
 
