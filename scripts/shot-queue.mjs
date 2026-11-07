@@ -5,7 +5,7 @@
 // 产物：docs/screenshot-queue.png
 
 import { spawn } from 'node:child_process';
-import { killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync } from './_browser.mjs';
+import { findTestBrowser, killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync } from './_browser.mjs';
 import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -18,14 +18,10 @@ const DARK = process.argv.includes('--dark');
 const CDP = 9457;
 const WEB = 8914;
 
-const BROWSERS = [
-  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Google/Chrome/Application/chrome.exe',
-];
-const browser = BROWSERS.find((p) => existsSync(p));
+const browser = findTestBrowser();
+
 if (!browser) {
-  console.error('未找到浏览器');
+  console.error('未找到 Chrome/Edge，请安装或将 NBC_BROWSER 设为 chrome|edge');
   process.exit(1);
 }
 

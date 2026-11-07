@@ -8,7 +8,7 @@
 // 它会真实地：加载扩展 → 打开测试页 → 调工具 → 检查 DOM/文件系统结果。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync, assertOwnsCdpPort } from './_browser.mjs';
+import { findTestBrowser, killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync, assertOwnsCdpPort } from './_browser.mjs';
 import {
   mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, readFileSync,
   readdirSync, statSync,
@@ -24,15 +24,10 @@ const EXT = join(ROOT, 'extension');
 const PORT = 9444;
 const WEB_PORT = 8901;
 
-const EDGE_CANDIDATES = [
-  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Google/Chrome/Application/chrome.exe',
-  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-];
-const browser = EDGE_CANDIDATES.find((p) => existsSync(p));
+const browser = findTestBrowser();
+
 if (!browser) {
-  console.error('未找到 Edge/Chrome 可执行文件');
+  console.error('未找到 Chrome/Edge，请安装或将 NBC_BROWSER 设为 chrome|edge');
   process.exit(1);
 }
 
@@ -358,7 +353,11 @@ async function main() {
       t.url.startsWith('chrome-extension://') &&
       t.url.includes('/src/background/service-worker.js')
   );
-  check('扩展 Service Worker 已启动', Boolean(swTarget), swTarget?.url || '未找到');
+  check('扩展 Service Worker 已启动', Boolean(swTarget),
+    swTarget?.url ||
+    (/chrome\.exe/i.test(browser)
+      ? 'Chrome 136+ 正式版不再支持 --load-extension 加载未打包扩展，请改用 Edge（默认）或 Chrome for Testing'
+      : '未找到，请确认 extension 目录存在'));
   if (!swTarget) return;
 
   // 确认跑的是最新代码：Edge 可能缓存了上一次的扩展内容。
@@ -617,24 +616,17 @@ async function main() {
 
   // 等页面真正渲染出表格行 —— 系统负载高时固定 sleep 不够，
   // 表格还是空的就会采到 0 条（实测踩过）。
-  const listScrollWait = await httpJson('/json/list');
-  const scrollTargetWait = listScrollWait.find(
-    (t) => t.type === 'page' && t.url.includes('scroll-table.html')
-  );
-  if (scrollTargetWait) {
-    const scWait = connect(scrollTargetWait.webSocketDebuggerUrl);
-    await scWait.ready;
-    await scWait.send('Runtime.enable');
-    for (let i = 0; i < 24; i++) {
-      const rows = await scWait
-        .evaluate(`document.querySelectorAll('#tbody tr').length`)
-        .catch(() => 0);
-      if (rows > 0) break;
-      await sleep(400);
-    }
-    scWait.ws.close();
+  // 通过扩展自身的探活 + tables 计数来等，不依赖 CDP 的 /json/list 时序。
+  for (let i = 0; i < 25; i++) {
+    const st = await panel
+      .evaluate(
+        `chrome.runtime.sendMessage({type:'nbc:tool',name:'page.tables',args:{tabId:${scrollTabId}}})` +
+          `.then(r=>JSON.stringify(r)).catch(e=>JSON.stringify({ok:false,error:String(e)}))`
+      )
+      .then((s) => JSON.parse(s));
+    if (st.ok && (st.data?.[0]?.rowCount || 0) > 0) break;
+    await sleep(400);
   }
-  await sleep(500);
   const scrollCall = (name, args = {}) =>
     panel
       .evaluate(

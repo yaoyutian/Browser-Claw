@@ -107,6 +107,31 @@ function findJsRuntime() {
 }
 
 /**
+ * 工具探测结果缓存（60 秒）。
+ *
+ * probeBinary 会同步 spawn 子进程（各几百毫秒），而 /health 被扩展
+ * 高频调用（并行探活多个端口 + 每秒轮询）—— 每个请求都 spawn 的话
+ * 事件循环会被阻塞，连接堆积后直接 ECONNRESET（实测踩过）。
+ * 所以探测结果必须缓存，不能按请求现算。
+ */
+let toolsCache = null;
+let toolsCacheAt = 0;
+const TOOLS_CACHE_TTL = 60_000;
+
+/** 拿 ffmpeg / yt-dlp 的探测状态（带 60 秒缓存）。 */
+function getToolsStatus(force = false) {
+  if (!force && toolsCache && Date.now() - toolsCacheAt < TOOLS_CACHE_TTL) {
+    return toolsCache;
+  }
+  toolsCache = {
+    ffmpeg: probeBinary(toolConfig.ffmpegPath),
+    ytdlp: probeBinary(toolConfig.ytdlpPath, '--version'),
+  };
+  toolsCacheAt = Date.now();
+  return toolsCache;
+}
+
+/**
  * 探测一个可执行文件是否可用。
  * 只做只读检查（-version），不执行任何用户输入的任意参数。
  */
@@ -264,6 +289,7 @@ const server = http.createServer(async (req, res) => {
   try {
     // --- 健康检查 ---------------------------------------------------------
     if (url.pathname === '/health') {
+      const tools = getToolsStatus();
       sendJson(res, 200, {
         ok: true,
         name: 'netbrowserclaw-companion',
@@ -275,8 +301,8 @@ const server = http.createServer(async (req, res) => {
         wsConnections: wsConnections.size,
         pendingCommands: pending.length,
         tools: {
-          ffmpeg: toolConfig.ffmpegPath ? probeBinary(toolConfig.ffmpegPath).ok : false,
-          ytdlp: toolConfig.ytdlpPath ? probeBinary(toolConfig.ytdlpPath, '--version').ok : false,
+          ffmpeg: tools.ffmpeg.ok,
+          ytdlp: tools.ytdlp.ok,
         },
         downloadDir: toolConfig.downloadDir,
       });
@@ -392,8 +418,8 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         config: {
           ...toolConfig,
-          ffmpegDetected: probeBinary(toolConfig.ffmpegPath),
-          ytdlpDetected: probeBinary(toolConfig.ytdlpPath, '--version'),
+          ffmpegDetected: getToolsStatus().ffmpeg,
+          ytdlpDetected: getToolsStatus().ytdlp,
           downloadDirExists: existsSync(toolConfig.downloadDir),
         },
       });
@@ -409,14 +435,15 @@ const server = http.createServer(async (req, res) => {
         next.downloadDir = body.downloadDir.trim();
       }
       toolConfig = next;
+      toolsCache = null; // 配置变了，下次探测强制刷新
       const persisted = saveConfig();
       sendJson(res, 200, {
         ok: true,
         persisted,
         config: {
           ...toolConfig,
-          ffmpegDetected: probeBinary(toolConfig.ffmpegPath),
-          ytdlpDetected: probeBinary(toolConfig.ytdlpPath, '--version'),
+          ffmpegDetected: getToolsStatus(true).ffmpeg,
+          ytdlpDetected: getToolsStatus(true).ytdlp,
           downloadDirExists: existsSync(toolConfig.downloadDir),
         },
       });
@@ -512,6 +539,10 @@ const server = http.createServer(async (req, res) => {
         const outName = (filename || 'download').replace(/[\\/:*?"<>|]/g, '_');
         const outTemplate = pathJoin(toolConfig.downloadDir, `${outName}.%(ext)s`);
         const args = ['--no-playlist', '--newline', '-o', outTemplate];
+
+        // 并发分片下载 —— YouTube 对单连接限速明显，多连接能快数倍
+        const frags = Math.min(Math.max(Number(process.env.NBC_YTDLP_FRAGMENTS) || 8, 1), 16);
+        args.push('-N', String(frags));
 
         // 只要音频
         if (audioOnly) {
@@ -1062,4 +1093,25 @@ export function ytDlpAvailable() {
 process.on('SIGINT', () => {
   server.close();
   process.exit(0);
+});
+
+// ---------------------------------------------------------------------------
+// 长驻守护：不能让偶发错误把进程带崩。
+//
+// 实测的退出源：浏览器/SW 被回收时，companion 正在往已断开的 socket 写响应，
+// 触发 EPIPE；以及未处理的 Promise 拒绝（Node 15+ 默认直接崩进程）。
+// 这类错误都只记日志、继续服务 —— 宕机的代价（浏览器功能失联）远大于继续跑。
+// ---------------------------------------------------------------------------
+
+process.on('uncaughtException', (e) => {
+  process.stderr.write(`[companion] 未捕获异常（已忽略，继续运行）：${e?.stack || e}\n`);
+});
+
+process.on('unhandledRejection', (e) => {
+  process.stderr.write(`[companion] 未处理的 Promise 拒绝（已忽略）：${e?.stack || e}\n`);
+});
+
+// 客户端粗暴断开（SW 被回收、浏览器关闭）时不崩
+server.on('clientError', (err, socket) => {
+  try { socket.destroy(); } catch { /* ignore */ }
 });

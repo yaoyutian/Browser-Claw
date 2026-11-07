@@ -24,13 +24,14 @@
   "scripts": {
     "icons": "node scripts/make-icons.mjs",
     "check": "node scripts/check-project.mjs",
+    "test:agent": "node scripts/test-agent.mjs",
+    "quick": "node scripts/check-project.mjs && node scripts/test-agent.mjs",
     "verify": "node scripts/verify-e2e.mjs",
     "verify:mcp": "node scripts/verify-mcp.mjs",
     "verify:all": "node scripts/check-project.mjs && node scripts/test-agent.mjs && node scripts/verify-e2e.mjs && node scripts/verify-mcp.mjs",
     "companion": "node companion/server.mjs",
     "companion:mcp": "node companion/server.mjs --mcp",
-    "diag:bridge": "node scripts/diag-bridge.mjs",
-    "test:agent": "node scripts/test-agent.mjs"
+    "diag:bridge": "node scripts/diag-bridge.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

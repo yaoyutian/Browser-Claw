@@ -5,7 +5,7 @@
 // 用法：node scripts/verify-mcp.mjs
 
 import { spawn, spawnSync } from 'node:child_process';
-import { killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync, assertOwnsCdpPort } from './_browser.mjs';
+import { findTestBrowser, killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync, assertOwnsCdpPort } from './_browser.mjs';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -22,14 +22,10 @@ const WEB_PORT = 8902;
 // MCP 命令就会被用户的浏览器抢走 —— 在他的真实页面上执行工具（实测发生过）。
 const NBC_PORT = 8791;
 
-const EDGE_CANDIDATES = [
-  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Google/Chrome/Application/chrome.exe',
-];
-const browser = EDGE_CANDIDATES.find((p) => existsSync(p));
+const browser = findTestBrowser();
+
 if (!browser) {
-  console.error('未找到浏览器');
+  console.error('未找到 Chrome/Edge，请安装或将 NBC_BROWSER 设为 chrome|edge');
   process.exit(1);
 }
 
@@ -215,7 +211,12 @@ async function main() {
     } catch {}
     if (!swTarget) await sleep(500);
   }
-  check('扩展已加载', Boolean(swTarget), swTarget?.url || '');
+  check('扩展已加载', Boolean(swTarget),
+    swTarget?.url ||
+    (/chrome\.exe/i.test(browser)
+      ? 'Chrome 136+ 的正式版不再支持 --load-extension 加载未打包扩展，'
+        + '请改用 Edge（默认）或 Chrome for Testing'
+        : '未找到，请确认扩展目录存在'));
   if (!swTarget) return;
 
   const sw = connect(swTarget.webSocketDebuggerUrl);
