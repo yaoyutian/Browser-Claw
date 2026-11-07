@@ -5,6 +5,36 @@
   if (window.__nbcContentReady) return;
   window.__nbcContentReady = true;
 
+  /**
+   * 扩展上下文是否仍有效。
+   *
+   * 扩展被重新加载/更新后，**已注入页面的旧内容脚本会变成孤儿**——
+   * 与旧实例的连接已失效，此时任何 chrome.runtime 调用都会【同步】抛出
+   * "Extension context invalidated"（注意：.catch 拦不住同步抛出）。
+   * 检测方式：孤儿脚本里 chrome.runtime.id 变为 undefined。
+   */
+  const ctxAlive = () => Boolean(chrome?.runtime?.id);
+  let invalidationNotified = false;
+
+  /**
+   * 安全地发消息给后台：上下文失效时静默跳过，
+   * 并在控制台提示一次「刷新页面」。
+   */
+  function safeSend(msg) {
+    if (!ctxAlive()) {
+      if (!invalidationNotified) {
+        invalidationNotified = true;
+        console.info(
+          '[NetBrowserClaw] 扩展已重新加载，本页的旧脚本已停止工作。刷新页面即可恢复。'
+        );
+      }
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage(msg).catch(() => {});
+    } catch { /* 扩展上下文在调用瞬间失效 */ }
+  }
+
   const call = (fn, ...args) => {
     if (typeof fn !== 'function') throw new Error('函数不存在');
     return fn(...args);
@@ -597,12 +627,12 @@
         fn(info);
       } catch { /* ignore */ }
     }
-    chrome.runtime.sendMessage({ type: 'nbc:selection', info }).catch(() => {});
+    safeSend({ type: 'nbc:selection', info });
   });
 
   /** 请求后台把 MAIN world 探针注入到当前页面。 */
   function requestProbe() {
-    chrome.runtime.sendMessage({ type: 'nbc:selection:probe' }).catch(() => {});
+    safeSend({ type: 'nbc:selection:probe' });
   }
 
   // 页面加载后请求注入探针。
@@ -678,6 +708,9 @@
   }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    // 孤儿脚本（扩展重载后的旧实例）收不到新实例的消息，但保险起见
+    // 上下文失效时直接静默退出，避免任何 sendResponse 调用再抛错。
+    if (!ctxAlive()) return true;
     (async () => {
       try {
         switch (msg?.type) {
