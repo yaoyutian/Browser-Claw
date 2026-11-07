@@ -72,6 +72,15 @@ loadConfig();
  * 它只认 deno / node / bun 等少数几个，且不接受裸名字 —— 必须给绝对路径。
  */
 function findJsRuntime() {
+  // 首选当前进程的可执行文件（一定是绝对路径，且必定是 node）。
+  // 它就是跑 companion 的那个 node，最可靠。
+  if (process.execPath && /\.exe$/i.test(process.execPath)) {
+    try {
+      const r = spawnSync(process.execPath, ['--version'], { encoding: 'utf8', shell: false });
+      if (r.status === 0) return `node:${process.execPath}`;
+    } catch { /* 落到下面的探测 */ }
+  }
+
   const candidates = [
     { cmd: 'deno', hint: 'deno' },
     { cmd: 'node', hint: 'node' },
@@ -81,9 +90,14 @@ function findJsRuntime() {
     try {
       const r = spawnSync(c.cmd, ['--version'], { encoding: 'utf8', shell: false });
       if (r.status === 0) {
-        // where 能拿到绝对路径
-        const w = spawnSync('where', [c.cmd], { encoding: 'utf8', shell: true });
-        const line = (w.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)[0];
+        // where.exe 能拿到绝对路径。
+        // 直接 spawn 而不用 shell —— 带参数走 shell 既是 Node 的弃用模式，
+        // 也意味着参数会被 shell 拼接解释。
+        const w = spawnSync('where.exe', [c.cmd], { encoding: 'utf8', shell: false });
+        const line = (w.stdout || '')
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean)[0];
         const abs = line || c.cmd;
         return `${c.hint}:${abs}`;
       }

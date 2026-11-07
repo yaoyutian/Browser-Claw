@@ -69,8 +69,9 @@ function findFfmpeg() {
   ]) {
     if (existsSync(p)) return p;
   }
-  // 借助 PATH
-  const r = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8', shell: true });
+  // 借助 PATH（不走 shell：带参数走 shell 会被 Node 标记为弃用模式，
+  // 而且参数是拼进 shell 命令解释的）
+  const r = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8', shell: false });
   if (r.status === 0) return 'ffmpeg';
   return '';
 }

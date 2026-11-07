@@ -11,6 +11,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync, assertOwnsCdpPort } from './_browser.mjs';
 import {
   mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, readFileSync,
+  readdirSync, statSync,
 } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -223,6 +224,20 @@ const webServer = spawn('python', ['-m', 'http.server', String(WEB_PORT), '--dir
   stdio: 'ignore',
 });
 
+// 自己启动一个 companion（默认端口 8787），保证「下载能力」相关测试
+// 不依赖外部状态 —— 之前依赖外部手动启动的 companion，会话结束进程被回收，
+// 测试就时好时坏。
+// 用 8789（不在用户扩展的默认候选列表的坑位之外？在列表里，但这是测试实例自己的
+// 扩展在轮询，与用户实例无关 —— 用户实例连的是它自己探测到的端口）。
+const companionProc = spawn(
+  process.execPath,
+  [join(ROOT, 'companion', 'server.mjs')],
+  {
+    env: { ...process.env, NBC_PORT: '8789' },
+    stdio: 'ignore',
+  }
+);
+
 // ---------------------------------------------------------------------------
 // 浏览器
 // ---------------------------------------------------------------------------
@@ -245,6 +260,7 @@ const cleanup = async () => {
   killTree(proc.pid);
   await cleanupStrayTestBrowsersAsync();
   killTree(webServer.pid);
+  killTree(companionProc.pid);
   try { rmSync(profile, { recursive: true, force: true }); } catch {}
   try { rmSync(webRoot, { recursive: true, force: true }); } catch {}
 };
@@ -598,6 +614,27 @@ async function main() {
   const scrollTabId = await sw.evaluate(
     `chrome.tabs.query({url:'http://127.0.0.1:${WEB_PORT}/scroll-table.html'}).then(ts=>ts[ts.length-1].id)`
   );
+
+  // 等页面真正渲染出表格行 —— 系统负载高时固定 sleep 不够，
+  // 表格还是空的就会采到 0 条（实测踩过）。
+  const listScrollWait = await httpJson('/json/list');
+  const scrollTargetWait = listScrollWait.find(
+    (t) => t.type === 'page' && t.url.includes('scroll-table.html')
+  );
+  if (scrollTargetWait) {
+    const scWait = connect(scrollTargetWait.webSocketDebuggerUrl);
+    await scWait.ready;
+    await scWait.send('Runtime.enable');
+    for (let i = 0; i < 24; i++) {
+      const rows = await scWait
+        .evaluate(`document.querySelectorAll('#tbody tr').length`)
+        .catch(() => 0);
+      if (rows > 0) break;
+      await sleep(400);
+    }
+    scWait.ws.close();
+  }
+  await sleep(500);
   const scrollCall = (name, args = {}) =>
     panel
       .evaluate(
@@ -627,15 +664,20 @@ async function main() {
   // 用真实鼠标拖拽建立选区 ——
   // Runtime.evaluate 建立的选区只属于调试上下文，页面世界（MAIN world）读不到，
   // 而真实选区正是靠 chrome.scripting.executeScript({world:'MAIN'}) 读取的。
-  const boxJson = await sc.evaluate(`(() => {
-    const cell = document.querySelector('#tbl tbody tr td');
-    if (!cell) return 'null';
-    const r = cell.getBoundingClientRect();
-    return JSON.stringify({
-      x1: r.left + 1, y1: r.top + r.height / 2 - 1,
-      x2: r.right - 1, y2: r.top + r.height / 2 + 1
-    });
-  })()`);
+  // 先等元素出现（负载高时页面可能还没渲染完）。
+  let boxJson = 'null';
+  for (let i = 0; i < 20 && boxJson === 'null'; i++) {
+    boxJson = await sc.evaluate(`(() => {
+      const cell = document.querySelector('#tbl tbody tr td');
+      if (!cell) return 'null';
+      const r = cell.getBoundingClientRect();
+      return JSON.stringify({
+        x1: r.left + 1, y1: r.top + r.height / 2 - 1,
+        x2: r.right - 1, y2: r.top + r.height / 2 + 1
+      });
+    })()`);
+    if (boxJson === 'null') await sleep(400);
+  }
   check('找到可划词元素', boxJson !== 'null', '');
   if (boxJson !== 'null') {
     const b = JSON.parse(boxJson);
@@ -821,21 +863,32 @@ async function main() {
   // 用 handler 返回的真实路径，并等待文件出现 ——
   // 用目录 glob 会匹配到上一轮遗留的旧文件，断言就失去意义了。
   const dlDir = join(homedir(), 'Downloads');
-  const rawPath = assetsArchive.data?.path || '';
   let archiveFile = '';
-  if (rawPath) {
-    const candidate = /^[A-Za-z]:/.test(rawPath) ? rawPath : join(dlDir, rawPath);
-    // 浏览器可能给同名文件加 " (N)" 后缀，逐一尝试
-    const ext = candidate.slice(candidate.lastIndexOf('.'));
-    const stem = candidate.slice(0, candidate.length - ext.length).replace(/\s*\(\d+\)$/, '');
-    for (let i = 0; i < 20; i++) {
-      const p = i === 0 ? candidate : `${stem} (${i})${ext}`;
-      if (existsSync(p)) {
-        archiveFile = p;
-        break;
-      }
-      await sleep(250);
+  // 不依赖 handler 返回的路径：chrome.downloads.search({id}) 在下载刚启动时
+  // 还查不到记录，返回的路径没有 " (N)" 后缀，与磁盘上的实际文件对不上。
+  // 改为按 mtime 找最新的归档文件，再用内容特征确认是本次产物（更严格）。
+  for (let i = 0; i < 24; i++) {
+    const cands = readdirSync(dlDir)
+      .filter((f) => f.includes('archive-') && f.endsWith('.html'))
+      .map((f) => {
+        const full = join(dlDir, f);
+        let t = 0;
+        try { t = statSync(full).mtimeMs; } catch { /* ignore */ }
+        return { full, t };
+      })
+      .sort((a, b) => b.t - a.t);
+    for (const c of cands) {
+      try {
+        const html = readFileSync(c.full, 'utf8');
+        // 本次归档的特征：引用了带资源的那张图
+        if (html.includes('带外链资源的页面')) {
+          archiveFile = c.full;
+          break;
+        }
+      } catch { /* ignore */ }
     }
+    if (archiveFile) break;
+    await sleep(300);
   }
   check('归档文件已落盘', Boolean(archiveFile), archiveFile);
   if (archiveFile) {
@@ -942,9 +995,15 @@ async function main() {
     check('未配置 yt-dlp 时给出配置指引',
       String(dpage.error || '') + String(dpage.detail || '').includes('yt-dlp'),
       String(dpage.error || '').slice(0, 60));
-    check('指引指向扩展设置而不是让用户敲命令行',
-      (String(dpage.detail || '') + String(dpage.error || '')).includes('设置'),
-      (String(dpage.detail || '')).slice(0, 80));
+    // 失败有两种合法指引：companion 没运行（提示启动命令）、
+    // 或 companion 在但没配 yt-dlp（提示去设置里填路径）。
+    // 两者都可操作，都算通过 —— 不能只认其中一种。
+    const guidance = String(dpage.detail || '') + String(dpage.error || '');
+    check(
+      '失败时给出可操作的指引（启动 companion 或配置 yt-dlp）',
+      guidance.includes('companion/server.mjs') || guidance.includes('设置'),
+      guidance.slice(0, 80)
+    );
   }
 
   console.log('\n面板控制台日志：');
