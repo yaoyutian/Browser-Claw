@@ -225,14 +225,20 @@ function readJson(req) {
 }
 
 function sendJson(res, status, payload) {
+  // 客户端可能在响应前就断开（SW 被回收、浏览器关闭）——
+  // 写已死的 socket 会抛 EPIPE，之前是进程退出的源头之一。
+  if (res.destroyed || res.writableEnded) return;
+  res.on('error', () => {}); // 写入失败的错误事件不能冒泡成未捕获异常
   const body = JSON.stringify(payload);
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Private-Network': 'true',
-  });
-  res.end(body);
+  try {
+    res.writeHead(status, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Private-Network': 'true',
+    });
+    res.end(body);
+  } catch { /* 客户端已断开，忽略 */ }
 }
 
 /** 取 URL 的文件名部分。 */
@@ -356,7 +362,10 @@ const server = http.createServer(async (req, res) => {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        res.write(Buffer.from(value));
+        if (res.destroyed) { reader.cancel().catch(() => {}); break; }
+        try {
+          res.write(Buffer.from(value));
+        } catch { /* 客户端已断开 */ break; }
       }
       res.end();
       return;

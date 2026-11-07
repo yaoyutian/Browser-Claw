@@ -104,13 +104,36 @@
 
 - 官方 API 不允许浏览器直连（报 CORS 错误）→ 用**中继模式**
 - 想让外部 MCP 客户端（Claude Code / Cursor）驱动浏览器 → 用 **MCP 模式**
-- 想下载 **HLS/DASH 视频流**（`.m3u8` / `.mpd`）→ 需要 companion 调用 **ffmpeg** 合并分片
+- 想下载视频（YouTube/Bilibili 的 yt-dlp 路径）或 **HLS/DASH 流**（ffmpeg 合并）
+
+#### 方式一：随浏览器自动启动（推荐）
+
+一次性安装 Native Messaging 宿主（写入 HKCU 注册表，**无需管理员**）：
+
+```bash
+node scripts/install-native-host.mjs [你的扩展ID]
+```
+
+扩展 ID 从 `edge://extensions` / `chrome://extensions` 页面复制。
+之后**打开浏览器时 companion 自动启动，关浏览器后自行保留**，
+设置里的「启动 companion」按钮也会生效（检测到未运行时出现）。
+
+#### 方式二：手动常驻
 
 ```bash
 node companion/server.mjs          # 仅 HTTP 服务（反代 + 桥接）
 node companion/server.mjs --mcp    # 额外启用 MCP stdio
 NBC_PORT=8788 node companion/server.mjs   # 换端口（扩展会自动发现 8787/8788/8789/8790/8888）
 ```
+
+想开机常驻可以用计划任务（无需管理员，登录时启动）：
+
+```bash
+schtasks /create /tn "NetBrowserClaw" /tr "cmd /c node C:\路径\companion\server.mjs" /sc onlogon /f
+```
+
+companion 内置崩溃防护：浏览器断开时的 EPIPE、未处理的 Promise 拒绝等
+偶发错误只记日志，不会把进程带崩。
 
 #### 配置本地 ffmpeg / yt-dlp
 

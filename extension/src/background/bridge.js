@@ -25,6 +25,8 @@ let keepAliveTimer = null;
 // 上一次执行的结果，随下一个 poll 请求一起带回去。
 // 独立 POST 偶发丢失（连接复用/休眠），带回机制保证结果不丢。
 let pendingResults = [];
+// Native Messaging 自动拉起只试一次：宿主未安装时反复尝试没有意义
+let nativeStartTried = false;
 
 /**
  * 找到可用的 companion 地址。
@@ -46,8 +48,28 @@ async function executeTool(name, args) {
 }
 
 async function pollOnce() {
-  const found = await findRelayUrl();
+  let found = await findRelayUrl();
   if (found) relayUrl = found;
+
+  // 自愈：companion 不在时，通过 Native Messaging 静默拉起一次。
+  // 宿主未安装会拿到「未安装」的指引，只在日志里记一次，不再重复尝试。
+  if (!found && !nativeStartTried) {
+    nativeStartTried = true;
+    try {
+      const { startCompanionViaNative } = await import('./native-host.js');
+      const r = await startCompanionViaNative();
+      if (r.ok) {
+        console.log('[nbc bridge] companion 已通过 Native Messaging 拉起');
+        nativeStartTried = false; // 拉起成功后重置：之后 companion 再挂还能自动拉
+        found = await findRelayUrl();
+        if (found) relayUrl = found;
+      } else {
+        console.log('[nbc bridge] 未自动拉起 companion：', r.error || '');
+      }
+    } catch (e) {
+      console.log('[nbc bridge] Native 拉起失败：', e?.message || e);
+    }
+  }
 
   const carried = pendingResults;
   pendingResults = [];

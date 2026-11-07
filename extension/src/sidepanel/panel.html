@@ -157,6 +157,14 @@
           配置路径后会推送给 companion，用于合并 HLS/DASH 视频流。
         </p>
 
+        <div class="row">
+          <span class="hint" id="companion-status" style="flex:1">companion 状态：检测中…</span>
+          <button id="btn-start-companion" class="mini-btn" hidden
+            title="通过 Native Messaging 拉起本地 companion（需已运行 install-native-host.mjs）">
+            启动
+          </button>
+        </div>
+
         <label for="inp-ffmpeg" class="sub-label">ffmpeg 路径</label>
         <div class="row">
           <input id="inp-ffmpeg" type="text" placeholder="C:\path\to\ffmpeg.exe" />

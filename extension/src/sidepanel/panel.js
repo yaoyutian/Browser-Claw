@@ -719,6 +719,23 @@ $('btn-test-conn').addEventListener('click', async () => {
   }
 });
 
+$('btn-start-companion').addEventListener('click', async () => {
+  const btn = $('btn-start-companion');
+  btn.disabled = true;
+  btn.textContent = '启动中…';
+  const res = await chrome.runtime.sendMessage({ type: 'nbc:companion:start' });
+  if (res?.ok) {
+    $('companion-status').textContent =
+      'companion 状态：已' + (res.alreadyRunning ? '在运行' : '启动');
+    await refreshToolStatus();
+  } else {
+    $('companion-status').textContent = `companion 状态：启动失败（${res?.error || '未知'}）`;
+    console.warn('[nbc] 启动 companion 失败', res);
+  }
+  btn.disabled = false;
+  btn.hidden = !res?.ok; // 失败时保持按钮可见以便重试
+});
+
 $('btn-detect-ffmpeg').addEventListener('click', () => detect('ffmpeg'));
 $('btn-detect-ytdlp').addEventListener('click', () => detect('ytdlp'));
 $('btn-detect-dir').addEventListener('click', () => detect('dir'));
@@ -726,11 +743,17 @@ $('btn-detect-dir').addEventListener('click', () => detect('dir'));
 /** 打开设置时，从 companion 拉一次已保存的配置。 */
 async function refreshToolStatus() {
   const res = await fetchToolConfig();
+  const compStatus = $('companion-status');
+  const startBtn = $('btn-start-companion');
   if (!res.ok) {
     setStatus('ffmpeg-status', 'companion 未运行 —— 本地工具功能不可用', false);
     setStatus('ytdlp-status', 'companion 未运行', false);
+    compStatus.textContent = 'companion 状态：未运行';
+    startBtn.hidden = false; // 显示「启动」按钮（走 Native Messaging 拉起）
     return;
   }
+  compStatus.textContent = 'companion 状态：运行中（' + res.data?.config?.downloadDir + '）';
+  startBtn.hidden = true;
   const c = res.data?.config || {};
   const f = c.ffmpegDetected || {};
   const y = c.ytdlpDetected || {};

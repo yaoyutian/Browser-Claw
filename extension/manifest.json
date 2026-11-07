@@ -13,7 +13,8 @@
     "activeTab",
     "contextMenus",
     "cookies",
-    "webNavigation"
+    "webNavigation",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "<all_urls>",

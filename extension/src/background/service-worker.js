@@ -16,6 +16,7 @@ import { startBridge } from './bridge.js';
 import { registerAutoApply } from './site-rules.js';
 import { registerDownloadEvents, recover } from './download-queue.js';
 import { setHistory as setChatHistory } from './chat-history.js';
+import { startCompanionViaNative } from './native-host.js';
 
 // ---------------------------------------------------------------------------
 // 侧边栏
@@ -91,6 +92,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === 'nbc:chat:sync') {
       const r = await setChatHistory(msg.messages, msg.meta);
       sendResponse({ ok: true, ...r });
+      return;
+    }
+
+    // 「启动 companion」按钮：走 Native Messaging 按需拉起本地进程。
+    if (msg?.type === 'nbc:companion:start') {
+      const r = await startCompanionViaNative();
+      if (r.ok) startBridge(); // 拉起成功后桥接下一轮轮询就能连上
+      sendResponse(r);
       return;
     }
 
