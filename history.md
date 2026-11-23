@@ -467,6 +467,7 @@ MCP 联动       23/23   ← 专属端口，与用户实例隔离
 |---|---|
 | HLS/DASH 下载依赖 companion + ffmpeg | 已实现，companion 未运行时给出明确提示 |
 | YouTube/Bilibili 视频下载 | 已实现（`media.downloadPage` → companion → yt-dlp）；实测下载出 9.5MB / 634.7s 的 mp3 |
+| pdf.js 预览器隐藏下载按钮 | 已实现（`pdf.reveal` 揭开隐藏样式，可选直接点击下载；跨 iframe） |
 | yt-dlp 需要 JS runtime | companion 自动探测 node/deno/bun 并传 `--js-runtimes`；都找不到时给出明确提示 |
 | yt-dlp 下载进度 | 目前是黑盒等待（下载完才返回），百分比未回传侧边栏 |
 | 表格翻页只识别常规分页控件 | 无限滚动已支持；无分页控件也不响应滚动的页面仍需手动 `page.scroll` |

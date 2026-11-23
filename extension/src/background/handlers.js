@@ -600,6 +600,20 @@ async function downloadTableDocs(args) {
   };
 }
 
+/**
+ * 揭开被隐藏的 pdf.js 工具栏按钮的样式。
+ * display:revert 回退到浏览器默认值（跳过站点 author 样式），
+ * 比写 display:block 更不容易被站点自己的级联规则覆盖。
+ */
+const PDF_REVEAL_CSS = [
+  '#download, #print, #openFile, #presentationMode, #secondaryToolbarToggle {',
+  '  display: revert !important;',
+  '}',
+  '#download, #print, #openFile, #presentationMode {',
+  '  visibility: visible !important;',
+  '}',
+].join('\n');
+
 export const handlers = {
   async 'page.read'(args) {
     const data = await contentCall({ type: 'nbc:extract' }, args.tabId);
@@ -882,6 +896,111 @@ export const handlers = {
       stats: result.stats,
       meta: result.meta,
       savedBy: 'extension',
+    };
+  },
+
+  /**
+   * 揭开被站点隐藏的 pdf.js 工具栏按钮（下载 / 打印 / 打开文件…）。
+   *
+   * 背景：很多系统内置 pdf.js 预览器，却用内联样式 display:none 藏起
+   * 「下载」「打印」按钮（截图 docs/showbutton/2.jpg：按钮就在 DOM 里）。
+   * pdf.js 把整份文档读进内存，所以它自带的下载按钮是完整可用的 ——
+   * 揭开样式就能用，不需要碰 pdf.js 内部。
+   *
+   * 实现：向所有 frame 注入一条 !important 的样式（站点后续 JS 无法再藏），
+   * 并统计每个 frame 里实际揭开了哪些按钮。可选直接点击某个按钮
+   * （如 download —— pdf.js 会用文档原始文件名触发浏览器下载）。
+   */
+  async 'pdf.reveal'(args) {
+    const tab = await getTab(args.tabId);
+    if (!tab?.id) throw new ToolError('找不到目标标签页');
+    if (!/^https?:|^file:/.test(tab.url || '')) {
+      throw new ToolError('当前页面不支持该操作', `页面协议不支持: ${(tab.url || '').slice(0, 80)}`);
+    }
+
+    const clickId = args.click || '';
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: (cssText, clickTarget) => {
+        // 每个 frame 独立执行：pdf.js 查看器经常内嵌在 iframe 里
+        const IDS = ['download', 'print', 'openFile', 'presentationMode', 'secondaryToolbarToggle'];
+        const wasHidden = (el) =>
+          getComputedStyle(el).display === 'none' || el.offsetParent === null;
+
+        // ⚠ 先记录隐藏状态、再注入样式 —— 顺序反了的话样式一注入
+        // 按钮就可见了，统计出来永远是空列表（实测踩过）。
+        const revealed = [];
+        for (const id of IDS) {
+          const el = document.getElementById(id);
+          if (el && wasHidden(el)) revealed.push('#' + id);
+        }
+
+        // 注入持久样式：!important 使站点后续 JS 也无法再隐藏这些按钮
+        let style = document.getElementById('nbc-pdf-reveal');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = 'nbc-pdf-reveal';
+          (document.head || document.documentElement).appendChild(style);
+        }
+        style.textContent = cssText;
+
+        // 可选：点击某个按钮（pdf.js 的 download 会按原始文件名触发下载）
+        let clicked = null;
+        if (clickTarget) {
+          const el = document.getElementById(clickTarget);
+          if (el) {
+            el.click();
+            clicked = '#' + clickTarget;
+          }
+        }
+
+        return {
+          url: location.href,
+          revealed,
+          clicked,
+          hasPdfToolbar: Boolean(document.getElementById('viewerContainer') || document.querySelector('.toolbarButton')),
+        };
+      },
+      args: [
+        // 揭开 pdf.js 全套工具按钮；display:revert 回退到浏览器默认值，
+        // 跳过站点的 author 样式，比 display:block 更不容易被站点的级联覆盖
+        PDF_REVEAL_CSS,
+        clickId,
+      ],
+    });
+
+    const frames = results
+      .filter((r) => r.result)
+      .map((r) => ({ frameId: r.frameId, ...r.result }));
+
+    const revealed = frames.flatMap((f) => f.revealed || []);
+    const clicked = frames.find((f) => f.clicked)?.clicked || null;
+    const hasPdfToolbar = frames.some((f) => f.hasPdfToolbar);
+
+    if (!hasPdfToolbar && !revealed.length) {
+      return {
+        ok: false,
+        note:
+          '未找到 pdf.js 工具栏。该页面可能使用浏览器原生 PDF 查看器' +
+          '（那种下载按钮是浏览器 UI，无法用页面脚本揭开）' +
+          '，或文档不是 pdf.js 渲染的。',
+        framesChecked: frames.length,
+      };
+    }
+
+    return {
+      ok: true,
+      revealed,
+      clicked,
+      hasPdfToolbar,
+      frameCount: frames.length,
+      inIframe: frames.length > 1,
+      note: revealed.length
+        ? `已揭开 ${revealed.length} 个被隐藏的按钮${clicked ? `，并已点击 ${clicked}` : ''}`
+        : clicked
+          ? `已点击 ${clicked}`
+          : '按钮本来就是可见的，未做修改',
     };
   },
 

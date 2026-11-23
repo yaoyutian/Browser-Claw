@@ -167,6 +167,34 @@ writeFileSync(
 </body></html>`
 );
 
+// --- pdf.js 预览器夹具：站点用内联样式隐藏了下载/打印按钮（还原真实场景）---
+writeFileSync(
+  join(webRoot, 'pdfviewer.html'),
+  `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>文档预览</title>
+<style>
+.toolbar { background:#333; padding:4px; }
+.toolbarButton { background:#555; color:#fff; border:none; padding:4px 8px; margin:2px; cursor:pointer; }
+</style></head><body>
+<div class="toolbar" id="toolbarViewerRight">
+  <button id="presentation_mode" class="toolbarButton" title="演示" tabindex="32"></button>
+  <button id="openFile" class="toolbarButton openFile hiddenLargeView"
+    style="display:none" title="打开文件" tabindex="33"><span>打开</span></button>
+  <button id="print" class="toolbarButton print hiddenMediumView"
+    style="display:none" title="打印" tabindex="34"><span>打印</span></button>
+  <button id="download" class="toolbarButton download hiddenMediumView"
+    style="display:none" title="下载" tabindex="35"><span data-l10n-id="download_label">下载</span></button>
+  <button id="secondaryToolbarToggle" class="toolbarButton" title="工具" tabindex="36"><span>工具</span></button>
+</div>
+<div id="viewerContainer"><div id="viewer">第 1 页（模拟 pdf.js 渲染区）</div></div>
+<script>
+// 真实场景还原：pdf.js 的下载逻辑由查看器提供，点击可用
+document.getElementById('download').addEventListener('click', () => {
+  window.__downloadClicked = (window.__downloadClicked || 0) + 1;
+});
+</script>
+</body></html>`
+);
+
 writeFileSync(
   join(webRoot, 'table.html'),
   `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>年度报表</title>
@@ -978,12 +1006,15 @@ async function main() {
   check('给出了可操作提示', typeof caps.data?.hint === 'string' && caps.data.hint.length > 0,
     (caps.data?.hint || '').slice(0, 60));
 
-  // companion 未配置 yt-dlp 时，downloadPage 要给出明确引导，而不是含糊报错
+  // downloadPage 的行为按实际能力分支断言：
+  //  · yt-dlp 未配置 → 必须给出可操作的配置/启动指引
+  //  · yt-dlp 已配置 → 真实发起下载，成功与否取决于目标站点与网络（都不算缺陷）
+  const ytDlpReady = caps.data?.ytDlp === true;
   const dpage = await call('media.downloadPage', {
     url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
   });
   check('media.downloadPage 有明确结果', dpage.ok === true || dpage.ok === false, '');
-  if (!dpage.ok) {
+  if (!ytDlpReady && !dpage.ok) {
     check('未配置 yt-dlp 时给出配置指引',
       String(dpage.error || '') + String(dpage.detail || '').includes('yt-dlp'),
       String(dpage.error || '').slice(0, 60));
@@ -996,7 +1027,65 @@ async function main() {
       guidance.includes('companion/server.mjs') || guidance.includes('设置'),
       guidance.slice(0, 80)
     );
+  } else {
+    check('yt-dlp 已配置时真实发起下载', dpage.ok === true || Boolean(dpage.error),
+      (dpage.error || 'ok').slice(0, 60));
   }
+
+  // --- 20. pdf.reveal —— 揭开被隐藏的 pdf.js 工具栏按钮 ------------------
+  console.log('\n[19] pdf.reveal —— 揭开被隐藏的下载/打印按钮');
+  await sw.evaluate(
+    `chrome.tabs.create({url:'http://127.0.0.1:${WEB_PORT}/pdfviewer.html'}).then(t=>t.id)`
+  );
+  await sleep(2000);
+  const pdfTabId = await sw.evaluate(
+    `chrome.tabs.query({url:'http://127.0.0.1:${WEB_PORT}/pdfviewer.html'}).then(ts=>ts[ts.length-1].id)`
+  );
+
+  const pdfCall = (name, args = {}) =>
+    panel
+      .evaluate(
+        `chrome.runtime.sendMessage({type:'nbc:tool',name:${JSON.stringify(name)},` +
+          `args:${JSON.stringify(args)},tabId:${pdfTabId}}).then(r=>JSON.stringify(r))`
+      )
+      .then((s) => JSON.parse(s));
+
+  const pdfList = await httpJson('/json/list');
+  const pdfTarget = pdfList.find((t) => t.type === 'page' && t.url.includes('pdfviewer.html'));
+  const pdfConn = connect(pdfTarget.webSocketDebuggerUrl);
+  await pdfConn.ready;
+  await pdfConn.send('Runtime.enable');
+
+  const preHidden = await pdfConn.evaluate(
+    `(()=>{const b=document.getElementById('download');return JSON.stringify({exists:!!b,hidden:b?getComputedStyle(b).display==='none':null})})()`
+  );
+  check('夹具里下载按钮确实被隐藏', preHidden.includes('"hidden":true'), preHidden);
+
+  const reveal = await pdfCall('pdf.reveal', {});
+  check('pdf.reveal 执行成功', reveal.ok === true, reveal.error || reveal.note || '');
+  check('统计到被揭开的按钮', (reveal.data?.revealed?.length || 0) >= 2,
+    JSON.stringify(reveal.data?.revealed));
+  check('download 按钮在揭开列表里', (reveal.data?.revealed || []).includes('#download'));
+  check('print 按钮在揭开列表里', (reveal.data?.revealed || []).includes('#print'));
+  check('识别出 pdf.js 工具栏', reveal.data?.hasPdfToolbar === true, '');
+
+  const postHidden = await pdfConn.evaluate(
+    `(()=>{const b=document.getElementById('download');return JSON.stringify({display:getComputedStyle(b).display,visible:b.offsetParent!==null})})()`
+  );
+  check('下载按钮现在真实可见', !postHidden.includes('"display":"none"') && postHidden.includes('"visible":true'),
+    postHidden);
+
+  // 点击下载（pdf.js 夹具里注册了监听器，验证点击链路可用）
+  const clicked = await pdfCall('pdf.reveal', { click: 'download' });
+  check('可选点击成功', clicked.data?.clicked === '#download', JSON.stringify(clicked.data?.clicked));
+  const clickCount = await pdfConn.evaluate(`String(window.__downloadClicked || 0)`);
+  check('下载按钮的点击事件被真实触发', clickCount === '1', `点击次数=${clickCount}`);
+
+  // 再跑一次：按钮已可见时应报告「未做修改」而不是重复统计
+  const reveal2 = await pdfCall('pdf.reveal', {});
+  check('按钮可见后重跑不再统计为揭开', (reveal2.data?.revealed?.length || 0) === 0,
+    JSON.stringify(reveal2.data?.revealed));
+  pdfConn.ws.close();
 
   console.log('\n面板控制台日志：');
   console.log(panel.logs.slice(-15).join('\n') || '（无）');

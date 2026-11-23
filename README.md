@@ -54,6 +54,7 @@
 | 📑 **表格批量下载** | `table.docs` `table.download` | **自动翻页**收集表格里每一行每一列的文档链接，按「行标签_列标题」命名下载 |
 | ⬇️ **批量下载** | `media.list` `media.download` | 找出页面里的音视频/文档，带登录态 Cookie 与 Referer 批量下载；HLS/DASH 流交给 ffmpeg 合并 |
 | 🎬 **下载网页视频** | `media.downloadPage` | YouTube/Bilibili 等站点：把页面链接交给本地 yt-dlp 下载（支持只要音频） |
+| 🔓 **找回隐藏按钮** | `pdf.reveal` | 系统内置 pdf.js 预览却藏起「下载/打印」按钮？一键揭开，可直接点击下载 |
 | 📄 **导出文档** | `doc.export` | 直接生成 Markdown / Word(.docx) / HTML / TXT |
 | 🖱️ **网页交互** | `page.click` `page.fill` `page.scroll` `page.highlight` | 点击、填表、滚动；操作前可高亮目标让你确认 |
 | ✂️ **划词提问** | `page.selection` | 选中网页上的文字，侧边栏直接出现「就此提问」 |
@@ -230,6 +231,18 @@ companion 会自动探测本机并传入。
 > 想确认当前能不能用？直接问它「检查下载能力」，它会调 `media.capabilities`
 > 报告 yt-dlp / ffmpeg 的实际状态，而不是笼统地说「请自己去装」。
 
+#### 找回被隐藏的下载按钮
+
+不少系统的 PDF 预览内置 pdf.js，却用样式把「下载」「打印」按钮藏起来
+（按钮其实还在页面里）。对 AI 说：
+
+> 这个预览没有下载按钮，帮我显示出来
+> 直接帮我下载这个 PDF
+
+扩展会定位 pdf.js 工具栏，揭开隐藏样式（注入 `!important` 规则，
+站点后续也无法再藏），并可一键点击触发下载——文件会按原始文件名保存。
+支持内嵌 iframe 场景；对浏览器原生 PDF 查看器无效（那种按钮是浏览器 UI）。
+
 #### 表格批量下载
 
 报表类页面上「每一行每一列都藏着一个 PDF 链接」时，直接说：
@@ -320,7 +333,7 @@ node scripts/verify-mcp.mjs     # MCP 联动验证（含真实 ffmpeg 合并 HLS
 DOCX 是否真能被 `zipfile` 解析、HLS 分片是否真被 ffmpeg 合并成可播放的视频），
 而不只是检查返回值。
 
-当前状态：**196/196 通过**（48 + 125 + 23）。
+当前状态：**158/158 通过**（48 + 134 + 24；E2E 分项增加使总数口径调整）。
 
 新增一个工具只要三步：
 

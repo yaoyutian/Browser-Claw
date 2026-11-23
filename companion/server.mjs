@@ -961,6 +961,18 @@ const MCP_TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'browser_reveal_pdf_buttons',
+    description:
+      '揭开被站点隐藏的 pdf.js 工具栏按钮（下载/打印/打开文件），可选直接点击下载。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        click: { type: 'string', enum: ['download', 'print', 'openFile'] },
+        tabId: { type: 'integer' },
+      },
+    },
+  },
+  {
     name: 'browser_list_tabs',
     description: '列出所有打开的网页标签页。',
     inputSchema: { type: 'object', properties: {} },
@@ -1001,6 +1013,7 @@ const MCP_TO_DISPATCH = {
   browser_export_chat: (a) => ['chat.export', { format: a.format }],
   browser_download_page: (a) => ['media.downloadPage', { url: a.url, filename: a.filename }],
   browser_download_capabilities: () => ['media.capabilities', {}],
+  browser_reveal_pdf_buttons: (a) => ['pdf.reveal', { click: a.click, tabId: a.tabId }],
   browser_list_tabs: () => ['tab.list', {}],
   browser_open_tab: (a) => ['tab.open', { url: a.url }],
 };

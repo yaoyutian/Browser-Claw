@@ -489,6 +489,27 @@ export const TOOLS = [
     },
   },
   {
+    name: 'pdf.reveal',
+    description:
+      '揭开被站点隐藏的 pdf.js 工具栏按钮（下载 / 打印 / 打开文件）。' +
+      '很多系统的 PDF 预览内置 pdf.js 却把「下载」按钮用样式藏起来——' +
+      '按钮其实还在 DOM 里，本工具把它的隐藏样式揭开即可使用，' +
+      '还能直接点击触发下载（pdf.js 会按原始文件名保存）。' +
+      '当用户说「这个预览没有下载按钮」「帮我把下载按钮显示出来」「下载这个 PDF」时使用。' +
+      '对浏览器原生 PDF 查看器无效（那种按钮是浏览器 UI）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'integer' },
+        click: {
+          type: 'string',
+          enum: ['download', 'print', 'openFile'],
+          description: '可选：揭开的同时点击某个按钮。要直接下载文件就用 download。',
+        },
+      },
+    },
+  },
+  {
     name: 'doc.export',
     description:
       '把一段内容保存为文件。format 可选：md（Markdown）、docx（Word）、html、txt。' +
