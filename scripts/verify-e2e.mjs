@@ -1186,20 +1186,45 @@ async function main() {
   }
   await sw.evaluate(`chrome.tabs.remove(${panel2TabId})`).catch(() => {});
 
-  // --- 21. 会话保存（真实发送链路） -------------------------------------
+  // --- 21. 会话保存 + 工具日志折叠（真实发送链路） ----------------------
   console.log('\n[21] 会话保存 —— 发送消息后写入本地存储');
   const MODEL_PORT = 8906;
+  let modelReq = 0;
   const fakeModel = createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
+      modelReq += 1;
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
       });
-      res.write(
-        `data: ${JSON.stringify({ choices: [{ delta: { content: '已记住 5678' }, index: 0 }] })}\n\n`
-      );
+      if (modelReq === 1) {
+        // 第一轮返回工具调用：验证工具卡片分组 + 底部日志折叠
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 't1',
+                      type: 'function',
+                      function: { name: 'download_queue', arguments: '{"action":"status"}' },
+                    },
+                  ],
+                },
+                index: 0,
+              },
+            ],
+          })}\n\n`
+        );
+      } else {
+        res.write(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: '已记住 5678' }, index: 0 }] })}\n\n`
+        );
+      }
       res.write('data: [DONE]\n\n');
       res.end();
     });
@@ -1257,6 +1282,21 @@ async function main() {
       await sleep(300);
     }
     check('模型回复已渲染', reply.includes('已记住 5678'), String(reply).slice(-60));
+
+    // 工具卡片、分组、底部日志汇总与自动收起
+    const uiRaw = await panel3.evaluate(
+      `JSON.stringify({
+        cards: document.querySelectorAll('#messages .tool-card').length,
+        groups: document.querySelectorAll('#messages .tool-group').length,
+        summary: document.getElementById('tray-summary').textContent,
+        collapsed: document.getElementById('tool-tray').classList.contains('collapsed'),
+      })`
+    );
+    const ui = JSON.parse(uiRaw || '{}');
+    check('工具调用生成卡片', ui.cards === 1, String(ui.cards));
+    check('工具卡片按轮分组', ui.groups === 1, String(ui.groups));
+    check('工具日志显示汇总', String(ui.summary || '').includes('1 次'), ui.summary);
+    check('工具日志结束后自动收起', ui.collapsed === true, String(ui.collapsed));
 
     const savedRaw = await panel3.evaluate(
       `chrome.storage.local.get(['nbc:sessions','nbc:sessions:current']).then(x=>JSON.stringify(x))`

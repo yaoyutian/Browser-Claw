@@ -262,6 +262,16 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
     trimOldImages(history, 2);
   }
 
+  // 达到轮次上限时，最后一轮可能只有工具调用、没有正文。
+  // 不给提示的话侧边栏会留下一个空气泡（看起来像一条无意义的横线）。
+  if (!assistantText.trim()) {
+    emit({
+      type: 'text',
+      text:
+        `\n_（已达到本轮最大工具调用次数 ${MAX_ROUNDS}，先停在这里。` +
+        '回复「继续」我就接着做。）_',
+    });
+  }
   emit({ type: 'done', text: assistantText, rounds: MAX_ROUNDS, truncated: true });
   return { messages: history, toolCalls };
 }

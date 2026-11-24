@@ -31,6 +31,10 @@
 
 * { box-sizing: border-box; }
 
+/* hidden 属性必须真的隐藏：.queue-panel 等元素设了 display:flex，
+   会盖掉浏览器默认的 [hidden] { display:none }，导致空队列条一直挂在那里 */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;
@@ -324,23 +328,32 @@ body {
 .bubble a { color: var(--accent); }
 
 /* ---------- 工具调用 ---------- */
+/* 折叠状态是一条紧凑的无边框行，不再是一排空框（看起来像无意义的横线） */
+.tool-group { display: flex; flex-direction: column; gap: 2px; }
+
 .tool-card {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-soft);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   overflow: hidden;
   font-size: 12px;
+}
+.tool-card.open {
+  border-color: var(--border);
+  background: var(--bg-soft);
 }
 
 .tool-head {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 9px;
+  padding: 4px 6px;
+  color: var(--fg-dim);
   cursor: pointer;
   user-select: none;
 }
-.tool-head:hover { background: var(--bg-elev); }
+.tool-head:hover { background: var(--bg-elev); color: var(--fg); }
+.tool-card.open .tool-head { color: var(--fg); }
 
 .tool-icon { color: var(--accent); font-size: 11px; }
 .tool-name { font-family: var(--mono); font-weight: 600; }
@@ -382,16 +395,57 @@ body {
 /* ---------- 底部工具托盘 ---------- */
 .tool-tray {
   flex: 0 0 auto;
-  max-height: 168px;
-  overflow-y: auto;
   border-top: 1px solid var(--border);
   background: var(--bg-soft);
-  padding: 7px 12px;
+}
+
+/* 标题行始终可见，明细默认折叠 —— 避免一长串日志一直占着输入框上方 */
+.tray-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 12px;
+  background: none;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.tray-head:hover { color: var(--fg); }
+
+.tray-caret,
+.queue-caret {
+  display: inline-block;
+  transition: transform 0.15s;
+  color: var(--fg-faint);
+}
+.tool-tray:not(.collapsed) .tray-caret,
+.queue-panel:not(.collapsed) .queue-caret { transform: rotate(90deg); }
+
+.tray-rows {
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 2px 12px 7px;
   font-size: 11.5px;
   color: var(--fg-dim);
 }
+.tool-tray.collapsed .tray-rows { display: none; }
+
 .tool-tray .t-row { padding: 2px 0; }
 .tool-tray .t-name { font-family: var(--mono); color: var(--fg); }
+
+/* 队列列表可折叠：全部完成后只留一行汇总 */
+.queue-title {
+  cursor: pointer;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.queue-title:hover { color: var(--fg); }
+.queue-panel.collapsed .queue-list { display: none; }
 
 /* ---------- 输入区 ---------- */
 .composer {

@@ -36,6 +36,10 @@ const el = {
   queueList: $('queue-list'),
   queueSummary: $('queue-summary'),
   queueToggle: $('btn-queue-toggle'),
+  queueExpand: $('btn-queue-expand'),
+  trayToggle: $('btn-tray-toggle'),
+  traySummary: $('tray-summary'),
+  toolRows: $('tool-rows'),
   sessions: $('btn-sessions'),
   sessionDrawer: $('session-drawer'),
   sessionList: $('session-list'),
@@ -60,6 +64,12 @@ const state = {
   sessionTab: null, // {url,title}：会话是在哪个标签页开始的
   followTab: true,
   windowId: null,
+  // 折叠状态
+  queueExpanded: false,
+  queueUserCollapsed: false,
+  trayExpanded: false,
+  trayUserCollapsed: false,
+  trayStats: { total: 0, failed: 0 },
   tools: {
     ffmpegPath: '',
     ytdlpPath: '',
@@ -289,7 +299,7 @@ function renderMarkdown(src) {
 // 工具卡片
 // ---------------------------------------------------------------------------
 
-function createToolCard(name) {
+function createToolCard(name, parent = el.messages) {
   const card = document.createElement('div');
   card.className = 'tool-card';
 
@@ -306,10 +316,43 @@ function createToolCard(name) {
 
   head.addEventListener('click', () => card.classList.toggle('open'));
 
-  el.messages.appendChild(card);
+  parent.appendChild(card);
   scrollToBottom();
   return { card, head, body };
 }
+
+// ---------------------------------------------------------------------------
+// 工具日志（底部可折叠）
+// ---------------------------------------------------------------------------
+
+function updateTraySummary(running = false) {
+  const { total, failed } = state.trayStats;
+  el.traySummary.textContent =
+    `工具调用 · ${total} 次` +
+    (failed ? ` · ${failed} 失败` : '') +
+    (running ? ' · 运行中…' : '');
+}
+
+function setTrayExpanded(expanded) {
+  state.trayExpanded = expanded;
+  el.tray.classList.toggle('collapsed', !expanded);
+}
+
+/** 每轮对话开始时清空上一轮的工具日志。 */
+function resetToolTray() {
+  state.trayStats = { total: 0, failed: 0 };
+  state.trayUserCollapsed = false;
+  el.toolRows.innerHTML = '';
+  el.tray.hidden = true;
+  setTrayExpanded(false);
+  updateTraySummary(false);
+}
+
+el.trayToggle.addEventListener('click', () => {
+  state.trayExpanded = !state.trayExpanded;
+  state.trayUserCollapsed = !state.trayExpanded;
+  el.tray.classList.toggle('collapsed', !state.trayExpanded);
+});
 
 function fillToolCard(tc, id, name, input, output, isError) {
   const card = el.messages.querySelectorAll('.tool-card');
@@ -521,8 +564,7 @@ async function switchSession(id, { render = true } = {}) {
   await state.sessionStore.setCurrent(s.id);
   if (render) {
     el.messages.innerHTML = '';
-    el.tray.hidden = true;
-    el.tray.innerHTML = '';
+    resetToolTray();
     renderHistory(state.messages);
   }
   updateSessionChrome();
@@ -543,8 +585,7 @@ async function startBlankSession({ withCurrentTab = true } = {}) {
     if (tab) state.sessionTab = { url: tab.url, title: tab.title };
   }
   el.messages.innerHTML = '';
-  el.tray.hidden = true;
-  el.tray.innerHTML = '';
+  resetToolTray();
   updateSessionChrome();
   await renderSessionList();
   syncChatHistory();
@@ -632,6 +673,7 @@ async function send() {
   state.busy = true;
   state.controller = new AbortController();
   if (!state.chatStartedAt) state.chatStartedAt = new Date().toISOString();
+  resetToolTray();
 
   renderMessage('user', text);
 
@@ -642,6 +684,8 @@ async function send() {
   let reasoningAcc = '';
   let rendered = '';
   const toolCards = new Map();
+  // 同一轮的工具调用放进一个容器，避免每调一次就在对话里多一个框
+  let toolGroup = null;
   let lastError = null;
 
   // 思维链单独放一个可折叠区域，不与正式回答混在一起。
@@ -675,14 +719,25 @@ async function send() {
       scrollToBottom();
     },
     tool_start: (ev) => {
-      const tc = createToolCard(ev.name);
+      if (!toolGroup) {
+        toolGroup = document.createElement('div');
+        toolGroup.className = 'tool-group';
+        // 工具调用应排在最终回答之前（气泡是提前创建的空占位）
+        el.messages.insertBefore(toolGroup, bubble.parentElement);
+      }
+      const tc = createToolCard(ev.name, toolGroup);
       tc.card.dataset.toolId = ev.id;
       toolCards.set(ev.id, { name: ev.name, input: ev.input });
+      state.trayStats.total += 1;
       el.tray.hidden = false;
+      if (!state.trayUserCollapsed) setTrayExpanded(true);
+      updateTraySummary(true);
       const row = document.createElement('div');
       row.className = 't-row';
+      row.dataset.toolId = ev.id;
       row.innerHTML = `<span class="t-name">${escapeHtml(ev.name)}</span> 运行中…`;
-      el.tray.appendChild(row);
+      el.toolRows.appendChild(row);
+      el.toolRows.scrollTop = el.toolRows.scrollHeight;
     },
     tool_end: (ev) => {
       const card = el.messages.querySelector(`.tool-card[data-tool-id="${ev.id}"]`);
@@ -698,8 +753,16 @@ async function send() {
             `<div class="tool-section"><h4>结果</h4><pre>${escapeHtml(typeof ev.output === 'string' ? ev.output : JSON.stringify(ev.output ?? {}, null, 2))}</pre></div>`;
         card.querySelector('.tool-body').innerHTML = resultHtml;
       }
-      const rows = el.tray.querySelectorAll('.t-row');
-      const row = rows[rows.length - 1];
+      if (ev.isError) state.trayStats.failed += 1;
+      updateTraySummary(false);
+      // 按 id 找对应行：模型可能在同一轮并发调用多个工具
+      let row = null;
+      for (const r of el.toolRows.querySelectorAll('.t-row')) {
+        if (r.dataset.toolId === ev.id) {
+          row = r;
+          break;
+        }
+      }
       if (row) {
         row.innerHTML = `<span class="t-name">${escapeHtml(ev.name)}</span> ${ev.isError ? '<span style="color:var(--err)">失败</span>' : '完成'}`;
       }
@@ -744,6 +807,21 @@ async function send() {
       reasoningBox.querySelector('.reasoning-body').innerHTML = renderMarkdown(reasoningAcc);
     } else {
       reasoningBox.remove();
+    }
+    // 没有正文时不要留一个空的带边框气泡 —— 多个空框叠在一起
+    // 看起来就是一排「无意义的横线」。
+    if (!acc.trim()) {
+      const wrap = bubble.parentElement;
+      if (wrap) wrap.remove();
+      const note = document.createElement('div');
+      note.className = 'msg-note';
+      note.textContent = '（本轮没有文字回复）';
+      el.messages.appendChild(note);
+    }
+    // 一轮结束后把工具日志收起，只留一行汇总（可点击展开）
+    if (state.trayStats.total) {
+      updateTraySummary(false);
+      setTrayExpanded(false);
     }
     state.busy = false;
     state.controller = null;
@@ -1199,6 +1277,17 @@ function renderQueue(queue) {
   el.queuePanel.hidden = !hasItems;
   if (!hasItems) return;
 
+  // 有任务在跑时自动展开；全部结束后自动收起，只留一行汇总。
+  // 用户手动收起后，本轮不再自动弹开（避免和用户抢状态）。
+  const active = (queue.running_ || 0) > 0 || (queue.pending || 0) > 0;
+  if (active) {
+    if (!state.queueUserCollapsed) state.queueExpanded = true;
+  } else {
+    state.queueExpanded = false;
+    state.queueUserCollapsed = false;
+  }
+  el.queuePanel.classList.toggle('collapsed', !state.queueExpanded);
+
   el.queueSummary.textContent =
     `${queue.done || 0}/${total} 完成` +
     (queue.failed ? ` · ${queue.failed} 失败` : '') +
@@ -1253,6 +1342,18 @@ $('btn-export-chat').addEventListener('click', exportChat);
 
 $('btn-queue-close').addEventListener('click', () => {
   el.queuePanel.hidden = true;
+});
+
+el.queueExpand.addEventListener('click', () => {
+  state.queueExpanded = !state.queueExpanded;
+  state.queueUserCollapsed = !state.queueExpanded;
+  el.queuePanel.classList.toggle('collapsed', !state.queueExpanded);
+});
+el.queueExpand.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    el.queueExpand.click();
+  }
 });
 
 $('btn-queue-toggle').addEventListener('click', async () => {

@@ -508,12 +508,16 @@ console.log('\n[13] 达到最大轮次时不崩溃');
     RESPONSES.push({ toolCalls: [{ id: `loop${i}`, name: 'page_read', args: {} }] });
   }
   const seen = [];
+  const texts = [];
   let threw = null;
   try {
     await runAgent({
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
       provider,
-      onEvent: (ev) => seen.push(ev.type),
+      onEvent: (ev) => {
+        seen.push(ev.type);
+        if (ev.type === 'text') texts.push(ev.text);
+      },
       enabledTools: [{ name: 'page.read', description: 'x', parameters: { type: 'object' } }],
     });
   } catch (e) {
@@ -523,6 +527,8 @@ console.log('\n[13] 达到最大轮次时不崩溃');
   check('发出 done 事件', seen.includes('done'), JSON.stringify(seen.slice(-3)));
   check('工具调用次数达到上限', seen.filter((x) => x === 'tool_start').length >= 10,
     `${seen.filter((x) => x === 'tool_start').length} 次`);
+  // 回归测试：曾在这种情况下留下一个空气泡（一排无意义的横线）
+  check('轮次上限时给出可见提示', texts.join('').includes('继续'), JSON.stringify(texts).slice(0, 80));
 }
 
 console.log('\n[14] 截图不把 base64 塞进对话历史');

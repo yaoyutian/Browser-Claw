@@ -37,9 +37,11 @@
   </div>
 
   <!-- 下载队列面板 -->
-  <section id="queue-panel" class="queue-panel" hidden>
+  <section id="queue-panel" class="queue-panel collapsed" hidden>
     <div class="queue-head">
-      <span class="queue-title">下载队列</span>
+      <span id="btn-queue-expand" class="queue-title" role="button" tabindex="0" title="展开/收起队列">
+        <span class="queue-caret">▸</span> 下载队列
+      </span>
       <span id="queue-summary" class="queue-summary"></span>
       <div class="queue-actions">
         <button id="btn-queue-toggle" class="link-btn" title="暂停/继续">暂停</button>
@@ -52,7 +54,13 @@
 
   <main id="messages" class="messages"></main>
 
-  <div id="tool-tray" class="tool-tray" hidden></div>
+  <div id="tool-tray" class="tool-tray collapsed" hidden>
+    <button id="btn-tray-toggle" class="tray-head" type="button" title="展开/收起工具日志">
+      <span class="tray-caret">▸</span>
+      <span id="tray-summary">工具调用</span>
+    </button>
+    <div id="tool-rows" class="tray-rows"></div>
+  </div>
 
   <footer class="composer">
     <div class="composer-row">
