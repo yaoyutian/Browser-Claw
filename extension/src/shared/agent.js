@@ -85,6 +85,8 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
   const tools = (enabledTools || TOOLS).filter((t) => providerSupportsTools(provider));
   const history = [...messages];
   let toolCalls = 0;
+  // 本轮请求内截图次数：用于在模型反复截图时提醒它回到 DOM。
+  let screenshotCount = 0;
   // 声明在循环外：达到最大轮次时循环外也要用到 assistantText。
   let assistantText = '';
   let reasoningText = '';
@@ -218,6 +220,7 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
         isError,
       });
       toolOutputMap.set(call.id, output);
+      if (!isError && call.name === 'page.screenshot') screenshotCount += 1;
       results.push(
         ToolResult(call.id, typeof output === 'string' ? output : JSON.stringify(output), isError)
       );
@@ -239,6 +242,14 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
         r.content = JSON.stringify({
           ...slim,
           screenshot: slim?.saved ? '已保存到下载目录' : '未能存盘',
+          // 软约束：反复截图时提醒模型回到 DOM，而不是硬性拒绝
+          ...(screenshotCount > 1
+            ? {
+                note:
+                  '本轮已多次截图。请优先用 page.read / page.tables / page.interactive / ' +
+                  'page.eval 从 DOM 获取信息与核对结果，截图仅用于视觉布局本身。',
+              }
+            : {}),
         });
       }
     }
@@ -322,6 +333,13 @@ export function systemPrompt({ siteName, pageTitle }) {
     '3. 批量下载前先用 page.links / media.list 列出候选项，把数量和文件名告诉用户。',
     '4. 工具报错时，读懂错误信息后调整参数重试一次；仍失败就如实说明，不要编造结果。',
     '5. 用中文回答，除非用户用其他语言提问。回答要具体、可执行，避免空话。',
+    '',
+    '关于信息获取顺序（重要）：',
+    '- 优先从 DOM 获取信息：正文用 page.read、表格用 page.tables、' +
+      '可交互元素用 page.interactive、样式/位置/可见性用 page.eval' +
+      '（getComputedStyle / getBoundingClientRect）。',
+    '- 截图只在「视觉布局本身」是答案时使用（整页美观度、元素遮挡、渲染错位、' +
+      '图片内容），不要用截图代替 DOM 读取；同一轮对话最多截 2 张，且不要连续截图。',
     '',
     '关于视频下载（重要）：',
     '- 页面里是 blob: 地址或带签名的分片流（YouTube、Bilibili、抖音等常见）时，' +

@@ -591,6 +591,21 @@ console.log('\n[14] 截图不把 base64 塞进对话历史');
   check('非视觉模型：工具结果留了存盘文件名',
     textOnlyJson.includes('screenshot-test.jpg'), '');
 
+  // 同一轮内第二次截图：工具结果里带「DOM 优先」的软提醒
+  RESPONSES.length = 0;
+  RESPONSES.push({ toolCalls: [{ id: 'r1', name: 'page_screenshot', args: {} }] });
+  RESPONSES.push({ toolCalls: [{ id: 'r2', name: 'page_screenshot', args: {} }] });
+  RESPONSES.push({ text: 'done' });
+  const repeated = await runAgent({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    provider: { ...provider, supportsImages: false },
+    onEvent: () => {},
+    enabledTools: shotTool,
+  });
+  check('重复截图时提醒回到 DOM',
+    JSON.stringify(repeated.messages).includes('优先用 page.read'),
+    '');
+
   // 连续 3 次截图：历史只保留最近 2 张图片块，更早的换成占位符
   RESPONSES.length = 0;
   for (let i = 0; i < 3; i++) {

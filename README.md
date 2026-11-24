@@ -50,7 +50,7 @@
 | 能力 | 工具 | 说明 |
 |---|---|---|
 | 📖 **读取网页** | `page.read` `page.links` `page.tables` `page.images` | 清洗后的 Markdown 正文、标题大纲、元信息、表格、链接、图片清单 |
-| 📸 **截图** | `page.screenshot` | JPEG 存到下载目录；视觉模型以图片块看图，**base64 不进上下文文本**（只保留最近 2 张） |
+| 📸 **截图** | `page.screenshot` | **优先 DOM**，截图只用于视觉布局本身；JPEG 存到下载目录，视觉模型以图片块看图，base64 不进上下文文本（只保留最近 2 张） |
 | 🎨 **修改网站样式** | `style.preset` `style.apply` `style.hide` | 深色模式、阅读模式、紧凑排版、全宽、隐藏图片；或注入任意 CSS（可限定作用域） |
 | 📑 **表格批量下载** | `table.docs` `table.download` | **自动翻页**收集表格里每一行每一列的文档链接，按「行标签_列标题」命名下载 |
 | ⬇️ **批量下载** | `media.list` `media.download` | 找出页面里的音视频/文档，带登录态 Cookie 与 Referer 批量下载；HLS/DASH 流交给 ffmpeg 合并 |

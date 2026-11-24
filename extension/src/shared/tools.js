@@ -20,10 +20,12 @@ export const TOOLS = [
   {
     name: 'page.screenshot',
     description:
-      '截取当前页面可见区域的截图（JPEG，同时存到下载目录）。当需要理解页面视觉布局、' +
-      '确认某个元素位置、或页面文字无法反映界面结构时使用。' +
-      '支持视觉的模型会直接看到图片；不支持视觉的模型只收到「已存盘」摘要。' +
-      '截图很占上下文，只在必要时调用，不要连续截多张。',
+      '截取当前页面可见区域的截图（JPEG，同时存到下载目录）。' +
+      '优先用 DOM：正文/表格/元素分别用 page.read / page.tables / page.interactive，' +
+      '位置、尺寸、可见性用 page.eval（getBoundingClientRect / getComputedStyle）。' +
+      '只有视觉布局本身无法从 DOM 判断时（遮挡、错位、整体美观、图片内容）才截图，' +
+      '同一轮不要超过 2 张。支持视觉的模型会直接看到图片；' +
+      '不支持视觉的模型只收到「已存盘」摘要。',
     parameters: {
       type: 'object',
       properties: {
