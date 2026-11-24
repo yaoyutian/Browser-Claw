@@ -69,7 +69,9 @@ export const PROVIDER_PRESETS = [
     defaultModel: 'deepseek-flash',
     keyUrl: 'https://platform.deepseek.com/api_keys',
     models: ['deepseek-flash', 'deepseek-v4-pro'],
-    supportsImages: false,
+    // deepseek-flash 支持视觉（官方 Vision 指南：tool/user 消息的 content
+    // 数组可携带图片）；截图会以多模态消息块而不是 base64 文本进入历史
+    supportsImages: true,
     supportsTools: true,
     // DeepSeek 默认开启思考模式，思维链会占用 max_tokens
     supportsThinking: true,

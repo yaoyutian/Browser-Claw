@@ -3,7 +3,7 @@
 // 放在侧边栏页面里跑（而不是 service worker），原因是 MV3 的 service worker
 // 随时可能被回收，长时间流式对话放在侧边栏页面更稳定。
 
-import { streamChat, Text, ToolUse, ToolResult, resolveProvider } from './providers.js';
+import { streamChat, Text, ToolUse, ToolResult, Image, resolveProvider } from './providers.js';
 import { TOOLS, TOOL_MAP } from './tools.js';
 import { truncate, redact } from './util.js';
 
@@ -163,6 +163,9 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
 
     // 逐个执行工具调用。
     const results = [];
+    // callId → 原始输出。原始输出里可能带截图 base64，只在拼接历史时用一次，
+    // 不会进入事件（面板）或工具结果文本。
+    const toolOutputMap = new Map();
     for (const call of pendingCalls) {
       toolCalls += 1;
 
@@ -202,7 +205,19 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
           detail: err?.detail ? truncate(String(err.detail), 1000) : undefined,
         };
       }
-      emit({ type: 'tool_end', id: call.id, name: call.name, output, isError });
+      // 事件里给面板的是精简版 + dataURL（面板用它显示截图缩略），
+      // 原始输出（含 base64）只留在 toolOutputMap 里做历史处理
+      const ex0 = extractImageFromOutput(output);
+      const eventOutput = ex0.image ? { ...ex0.output, __hasImage: true } : output;
+      emit({
+        type: 'tool_end',
+        id: call.id,
+        name: call.name,
+        output: eventOutput,
+        imageDataUrl: ex0.image ? `data:${ex0.image.mime};base64,${ex0.image.data}` : undefined,
+        isError,
+      });
+      toolOutputMap.set(call.id, output);
       results.push(
         ToolResult(call.id, typeof output === 'string' ? output : JSON.stringify(output), isError)
       );
@@ -210,6 +225,30 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
 
     // 工具结果以 user 角色回传（Anthropic 风格），各家协议层会再转换。
     history.push({ role: 'user', content: results });
+
+    // 截图类工具结果单独提取：视觉模型追加一条带图消息（按图计 token，
+    // 远比把 base64 当文本便宜）；文本模型直接跳过（截图已存盘）。
+    const images = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const raw = pendingCalls[i] ? toolOutputMap.get(pendingCalls[i].id) : null;
+      const { image, output: slim } = extractImageFromOutput(raw);
+      if (image && providerSupportsImages(provider)) images.push(image);
+      if (image) {
+        // 工具结果文本里只留摘要，绝不留 base64
+        r.content = JSON.stringify({
+          ...slim,
+          screenshot: slim?.saved ? '已保存到下载目录' : '未能存盘',
+        });
+      }
+    }
+    if (images.length && providerSupportsImages(provider)) {
+      history.push({
+        role: 'user',
+        content: images.map((im) => Image(im.mime, im.data)),
+      });
+    }
+    trimOldImages(history, 2);
   }
 
   emit({ type: 'done', text: assistantText, rounds: MAX_ROUNDS, truncated: true });
@@ -219,6 +258,46 @@ export async function runAgent({ messages, provider, onEvent, signal, enabledToo
 function providerSupportsTools(provider) {
   const p = resolveProvider(provider);
   return p.supportsTools !== false;
+}
+
+function providerSupportsImages(provider) {
+  const p = resolveProvider(provider);
+  return p.supportsImages === true;
+}
+
+/**
+ * 从工具输出里提取截图数据，并把输出改写成不含 base64 的精简版。
+ * 返回 { image: {mime,data} | null, output: 精简后的输出 }。
+ *
+ * 背景：page.screenshot 曾经把整张截图的 base64 直接当文本放进工具结果 ——
+ * 一张全屏截图 ≈ 25 万 token，两张就把 262K 上下文撑爆
+ * （实测报错：prompt contains at least 253953 input tokens）。
+ */
+function extractImageFromOutput(output) {
+  if (!output || typeof output !== 'object' || !output.__nbcImage) {
+    return { image: null, output };
+  }
+  const { __nbcImage, ...rest } = output;
+  return { image: { mime: __nbcImage.mime, data: __nbcImage.data }, output: rest };
+}
+
+/**
+ * 历史图片裁剪：只保留最近 maxKeep 张图片块，
+ * 更早的替换成文本占位符，防止长会话里截图无限堆积。
+ */
+function trimOldImages(history, maxKeep = 2) {
+  const imagePositions = [];
+  history.forEach((msg, mi) => {
+    if (!Array.isArray(msg.content)) return;
+    msg.content.forEach((b, bi) => {
+      if (b?.type === 'image') imagePositions.push({ mi, bi });
+    });
+  });
+  const toDrop = imagePositions.slice(0, Math.max(0, imagePositions.length - maxKeep));
+  for (const { mi, bi } of toDrop) {
+    history[mi].content[bi] = { type: 'text', text: '[早期截图已省略]' };
+  }
+  return toDrop.length;
 }
 
 /** 构造首次请求的系统提示词。 */

@@ -20,12 +20,18 @@ export const TOOLS = [
   {
     name: 'page.screenshot',
     description:
-      '截取当前页面可见区域的截图（PNG）。当需要理解页面视觉布局、' +
-      '确认某个元素位置、或页面文字无法反映界面结构时使用。',
+      '截取当前页面可见区域的截图（JPEG，同时存到下载目录）。当需要理解页面视觉布局、' +
+      '确认某个元素位置、或页面文字无法反映界面结构时使用。' +
+      '支持视觉的模型会直接看到图片；不支持视觉的模型只收到「已存盘」摘要。' +
+      '截图很占上下文，只在必要时调用，不要连续截多张。',
     parameters: {
       type: 'object',
       properties: {
         tabId: { type: 'integer', description: '目标标签页 ID' },
+        quality: {
+          type: 'integer',
+          description: 'JPEG 质量 1-100，默认 65。需要看清小字时可调高到 85。',
+        },
       },
     },
   },

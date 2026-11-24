@@ -525,6 +525,96 @@ console.log('\n[13] 达到最大轮次时不崩溃');
     `${seen.filter((x) => x === 'tool_start').length} 次`);
 }
 
+console.log('\n[14] 截图不把 base64 塞进对话历史');
+{
+  // 回归测试：page.screenshot 曾把整张截图的 base64 当文本放进工具结果，
+  // 一张全屏截图 ≈ 25 万 token，两张就把 262K 上下文撑爆
+  // （实测报错：prompt contains at least 253953 input tokens）。
+  const fakeB64 = 'A'.repeat(4000);
+  globalThis.chrome.runtime.sendMessage = async (msg) => {
+    if (msg?.type === 'nbc:tool') {
+      if (msg.name === 'page.screenshot') {
+        return {
+          ok: true,
+          data: {
+            ok: true,
+            __nbcImage: { mime: 'image/jpeg', data: fakeB64 },
+            saved: 'screenshot-test.jpg',
+            bytes: 3000,
+          },
+        };
+      }
+      return { ok: true, data: { ok: true } };
+    }
+    return { ok: true };
+  };
+
+  const shotTool = [
+    { name: 'page.screenshot', description: 'x', parameters: { type: 'object' } },
+  ];
+  const callShot = async (images) => {
+    RESPONSES.length = 0;
+    RESPONSES.push({ toolCalls: [{ id: 's1', name: 'page_screenshot', args: {} }] });
+    RESPONSES.push({ text: 'done' });
+    return runAgent({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      provider: { ...provider, supportsImages: images },
+      onEvent: () => {},
+      enabledTools: shotTool,
+    });
+  };
+
+  // 视觉模型：base64 只以多模态图片块存在，任何文本块里都不该有它
+  const vision = await callShot(true);
+  const textOnlyBlocks = [];
+  vision.messages.forEach((m) => {
+    if (!Array.isArray(m.content)) return;
+    m.content.forEach((b) => {
+      if (b?.type === 'text') textOnlyBlocks.push(b.text);
+    });
+  });
+  check(
+    '视觉模型：base64 不出现在文本块里',
+    !textOnlyBlocks.join('\n').includes(fakeB64),
+    textOnlyBlocks.join('\n').includes(fakeB64) ? 'base64 混进了文本' : '干净'
+  );
+  const hasImageBlock = vision.messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((b) => b?.type === 'image')
+  );
+  check('视觉模型：截图以多模态图片块存在', hasImageBlock, String(hasImageBlock));
+
+  // 非视觉模型：base64 完全不进历史（截图已存盘，只留摘要）
+  const textOnly = await callShot(false);
+  const textOnlyJson = JSON.stringify(textOnly.messages);
+  check('非视觉模型：base64 完全不进历史', !textOnlyJson.includes(fakeB64),
+    textOnlyJson.includes(fakeB64) ? 'base64 泄漏' : '干净');
+  check('非视觉模型：工具结果留了存盘文件名',
+    textOnlyJson.includes('screenshot-test.jpg'), '');
+
+  // 连续 3 次截图：历史只保留最近 2 张图片块，更早的换成占位符
+  RESPONSES.length = 0;
+  for (let i = 0; i < 3; i++) {
+    RESPONSES.push({ toolCalls: [{ id: `s${i}`, name: 'page_screenshot', args: {} }] });
+  }
+  RESPONSES.push({ text: 'done' });
+  const trimmed = await runAgent({
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    provider: { ...provider, supportsImages: true },
+    onEvent: () => {},
+    enabledTools: shotTool,
+  });
+  const imageBlocks = [];
+  trimmed.messages.forEach((m) => {
+    if (!Array.isArray(m.content)) return;
+    m.content.forEach((b) => {
+      if (b?.type === 'image') imageBlocks.push(b);
+    });
+  });
+  check('连续 3 次截图只保留最近 2 张', imageBlocks.length === 2, `实际 ${imageBlocks.length}`);
+  check('被裁掉的截图换成占位符',
+    JSON.stringify(trimmed.messages).includes('[早期截图已省略]'), '');
+}
+
 server.close();
 
 console.log(`\n${'='.repeat(50)}`);

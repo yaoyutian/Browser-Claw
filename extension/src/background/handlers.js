@@ -389,11 +389,16 @@ async function exportDocument({ format = 'md', content, title = 'document', sour
   return { ok: true, id, filename: `${base}.md`, format };
 }
 
-async function captureScreenshot(tabId) {
+async function captureScreenshot(tabId, { quality = 65 } = {}) {
   const tab = await getTab(tabId);
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+  // JPEG 而不是 PNG：截图是照片式内容，JPEG 体积小数倍
+  // （PNG 全屏可达数 MB，base64 后直接撑爆模型上下文）
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+    format: 'jpeg',
+    quality,
+  });
   const base64 = dataUrl.split(',')[1];
-  return { ok: true, dataUrl, base64, mime: 'image/png' };
+  return { ok: true, dataUrl, base64, mime: 'image/jpeg' };
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,7 +1010,27 @@ export const handlers = {
   },
 
   async 'page.screenshot'(args) {
-    return captureScreenshot(args.tabId);
+    const shot = await captureScreenshot(args.tabId, { quality: args.quality || 65 });
+
+    // 存盘：无论模型是否支持看图，用户都能打开这个文件
+    const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+    const filename = `screenshot-${stamp}.jpg`;
+    const bytes = Uint8Array.from(atob(shot.base64), (c) => c.charCodeAt(0));
+    let saved = null;
+    try {
+      await saveBlob(new Blob([bytes], { type: 'image/jpeg' }), filename);
+      saved = filename;
+    } catch { /* 保存失败不影响把截图给模型/用户 */ }
+
+    return {
+      ok: true,
+      // 专用标记：agent 会把它转成多模态消息块（视觉模型）或存盘路径（文本模型），
+      // 而不是把几百 KB 的 base64 当文本塞进对话历史（实测一次截图 ≈ 25 万 token，
+      // 两张就把 262K 上下文撑爆）。
+      __nbcImage: { mime: shot.mime, data: shot.base64 },
+      bytes: bytes.length,
+      saved,
+    };
   },
 
   async 'page.selection'(args) {

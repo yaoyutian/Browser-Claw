@@ -20,6 +20,7 @@
 | 5 | 工具定义与调用记录名字不一致 | 历史里的调用没走名称映射 | 协议 | `7015db6` |
 | 6 | 工具调用达到轮次上限时整个循环崩溃 | 变量作用域错误 | 代码 | `47bb081` |
 | 6b | `Invalid assistant message: content or tool_calls must be set` | 空回复被当成有效消息入历史 | 协议 | `7015db6` |
+| 6c | 截图后 `prompt contains at least 253953 input tokens` | 截图 base64 以文本进历史 | 协议 | 本次 |
 | 7 | 报错只有一句 `Failed to fetch` | 网络层错误未翻译 | 体验 | `47bb081` |
 | 8 | 同一个错误显示两遍 | 错误事件与 catch 各写一次 | 体验 | `47bb081` |
 | 9 | 表格翻页只采到最后一页 | 并发采集抢分页控件 | 竞态 | `7015db6` |
@@ -200,6 +201,48 @@ history.push({ role: 'assistant', content: [Text('')] });
   用户只看到半句话，却不知道为什么。
 - 这类 bug 的特点是**延迟爆炸**：第一轮正常，第二轮才报错。
   排查时如果只在单轮里测，永远发现不了。
+
+---
+
+### 6c. 截图把上下文撑爆（`prompt contains at least 253953 input tokens`）
+
+**现象**：`pdf.reveal` 能用之后，用户让它截图看效果，第二次截图就报
+
+```
+This model's maximum context length is 262144 tokens. However, you requested
+8192 output tokens and your prompt contains at least 253953 input tokens
+```
+
+**根因**：`page.screenshot` 把整张截图的 **base64 当普通文本**放进工具结果：
+
+```js
+return { ok: true, dataUrl, base64, mime };   // base64 ≈ 250k token
+```
+
+agent 又把工具结果 `JSON.stringify` 后塞进对话历史。一张全屏 PNG 的 base64
+就是 20 万 + token，**两张必爆**。更糟的是截图本身是给「模型看图」用的，
+以文本形式塞进去，模型既看不懂图，又白烧掉整个窗口。
+
+**修复**（三层）：
+
+1. **工具层**：`page.screenshot` 改成 JPEG（quality 65，体积小数倍），
+   文件先存到下载目录，返回值里放结构化字段 `__nbcImage: {mime, data}`；
+2. **agent 层**：`extractImageFromOutput()` 把图片从工具输出里摘出来，
+   工具结果文本只留 `{ ok, saved, bytes }`；视觉模型（`supportsImages`）
+   额外追加一条 `Image()` 多模态消息，按图计 token；
+   `trimOldImages(history, 2)` 只保留最近 2 张，更早的换成
+   `[早期截图已省略]` 占位符；
+3. **面板层**：`tool_end` 事件带 `imageDataUrl`，侧边栏渲染成
+   `max-height: 200px` 的缩略图，不再打印 base64 文本。
+
+**教训**：
+- **二进制数据绝不能以文本形式进对话历史**。判断标准很简单：
+  这段内容模型「读」得懂吗？读不懂就只传引用。
+- 大对象进历史前先算一下量级：`base64.length / 4 ≈ token 数`。
+- 视觉能力要按 provider 声明（`supportsImages`），因为不是所有
+  OpenAI 兼容端点都吃图片 —— DeepSeek 的 `deepseek-flash` 支持，
+  但很多自建网关不支持。
+- 长会话要主动裁剪历史里的图片，否则「每张都留」等于慢慢泄漏上下文。
 
 ---
 
@@ -445,20 +488,20 @@ for f in extension/src/**/*.js companion/*.mjs scripts/*.mjs; do node --check "$
 
 | 类别 | 数量 | 说明 |
 |---|---|---|
-| 模型协议 | 7 | #1~#6b，全部只在真实调用时暴露 |
+| 模型协议 | 8 | #1~#6c，全部只在真实调用时暴露 |
 | 浏览器进程 / 安全 | 3 | #15~#17，其中 2 项会直接影响用户 |
 | 平台限制 | 2 | #11、#12 |
 | 工具与内容脚本 | 4 | #9、#10、#13、#14 |
 | 体验与正确性 | 4 | #7、#8、#18、#19 |
 | 开发过程 | 2 | 字符串替换损坏、测试盲区 |
 
-**当前基线**：196 项自动化验证全通过
+**当前基线**：213 项自动化验证全通过
 
 ```
-结构自检        通过（38 个工具与 handler 双向一致）
-agent 单元测试  48/48   ← 覆盖主链路
-E2E           125/125
-MCP 联动       23/23   ← 专属端口，与用户实例隔离
+结构自检        通过（39 个工具与 handler 双向一致）
+agent 单元测试  54/54   ← 覆盖主链路 + 截图历史裁剪
+E2E           134/134
+MCP 联动       24/24   ← 专属端口，与用户实例隔离
 ```
 
 ## 遗留问题

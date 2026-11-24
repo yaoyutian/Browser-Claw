@@ -546,3 +546,12 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--fg-faint); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* 截图缩略图 */
+.tool-shot {
+  max-width: 100%;
+  max-height: 200px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  display: block;
+}

@@ -406,9 +406,13 @@ async function send() {
         const status = card.querySelector('.tool-status');
         status.className = `tool-status ${ev.isError ? 'err' : 'ok'}`;
         status.textContent = ev.isError ? '失败' : '完成';
-        card.querySelector('.tool-body').innerHTML =
-          `<div class="tool-section"><h4>入参</h4><pre>${escapeHtml(JSON.stringify(toolCards.get(ev.id)?.input ?? {}, null, 2))}</pre></div>` +
-          `<div class="tool-section"><h4>结果</h4><pre>${escapeHtml(typeof ev.output === 'string' ? ev.output : JSON.stringify(ev.output ?? {}, null, 2))}</pre></div>`;
+        // 截图类结果：显示缩略图而不是几千行的 base64 文本
+        const resultHtml = ev.imageDataUrl
+          ? `<div class="tool-section"><h4>截图</h4><img class="tool-shot" src="${ev.imageDataUrl}" alt="截图" /></div>` +
+            `<div class="tool-section"><h4>结果</h4><pre>${escapeHtml(JSON.stringify(ev.output ?? {}, null, 2))}</pre></div>`
+          : `<div class="tool-section"><h4>入参</h4><pre>${escapeHtml(JSON.stringify(toolCards.get(ev.id)?.input ?? {}, null, 2))}</pre></div>` +
+            `<div class="tool-section"><h4>结果</h4><pre>${escapeHtml(typeof ev.output === 'string' ? ev.output : JSON.stringify(ev.output ?? {}, null, 2))}</pre></div>`;
+        card.querySelector('.tool-body').innerHTML = resultHtml;
       }
       const rows = el.tray.querySelectorAll('.t-row');
       const row = rows[rows.length - 1];
