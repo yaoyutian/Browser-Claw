@@ -555,3 +555,41 @@ body {
   border: 1px solid var(--border);
   display: block;
 }
+
+/* ---------- 会话抽屉 ---------- */
+.s-actions { align-items: center; justify-content: space-between; }
+.s-actions .primary-btn { flex: 0 0 auto; }
+
+.session-list { display: flex; flex-direction: column; gap: 6px; }
+
+.s-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  cursor: pointer;
+}
+.s-row:hover { border-color: var(--accent); }
+.s-row.active { border-color: var(--accent); background: var(--bg-elev); }
+
+.s-main { flex: 1; min-width: 0; }
+.s-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.s-meta { font-size: 11px; color: var(--fg-faint); margin-top: 3px; }
+.s-host { color: var(--accent); }
+.s-empty { color: var(--fg-faint); font-size: 12px; padding: 12px 2px; }
+
+/* 恢复历史后，工具调用的占位说明 */
+.msg-note {
+  font-size: 11px;
+  color: var(--fg-faint);
+  padding: 2px 6px 8px;
+}

@@ -11,6 +11,7 @@ import {
   pushToolConfig,
   configuredUrl,
 } from '../shared/companion.js';
+import { createSessionStore, newSessionId, deriveTitle } from '../shared/sessions.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -35,6 +36,13 @@ const el = {
   queueList: $('queue-list'),
   queueSummary: $('queue-summary'),
   queueToggle: $('btn-queue-toggle'),
+  sessions: $('btn-sessions'),
+  sessionDrawer: $('session-drawer'),
+  sessionList: $('session-list'),
+  sessionCurrent: $('session-current'),
+  closeSessions: $('btn-close-sessions'),
+  newSession: $('btn-new-session'),
+  followTab: $('chk-follow-tab'),
 };
 
 const state = {
@@ -44,6 +52,14 @@ const state = {
   controller: null,
   selection: null,
   chatStartedAt: null,
+  // 会话持久化
+  sessionStore: null,
+  sessionId: null,
+  sessionTitle: '新会话',
+  sessionCreatedAt: null,
+  sessionTab: null, // {url,title}：会话是在哪个标签页开始的
+  followTab: true,
+  windowId: null,
   tools: {
     ffmpegPath: '',
     ytdlpPath: '',
@@ -171,6 +187,7 @@ function updateProviderBar() {
 }
 
 function openSettings() {
+  el.sessionDrawer.hidden = true;
   syncSettingsForm();
   el.settings.hidden = false;
   refreshToolStatus();
@@ -335,6 +352,269 @@ async function currentPageContext() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 会话管理（持久化 + 标签页轻关联）
+//
+// 设计取舍：会话默认是「全局一条时间线」，不会因为切标签页就硬切会话
+// （那会打断正在跑的 agent，也容易把上下文切碎）。标签页只做轻关联：
+//   · 每条会话记住它开始时的标签页，列表里显示站点；
+//   · 发消息时把「当前标签页 → 会话」记到 storage.session；
+//   · 打开「跟随标签页」后，切回某标签页会恢复它上次用的会话；
+//   · 没有绑定的标签页保持当前会话，不新建空会话。
+// ---------------------------------------------------------------------------
+
+let toastTimer = null;
+
+function toast(text) {
+  el.statusHint.textContent = text;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.statusHint.textContent = '';
+  }, 2500);
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname || '';
+  } catch {
+    return '';
+  }
+}
+
+function formatWhen(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  if (diff < 60e3) return '刚刚';
+  if (diff < 3600e3) return `${Math.floor(diff / 60e3)} 分钟前`;
+  if (diff < 86400e3) return `${Math.floor(diff / 3600e3)} 小时前`;
+  if (diff < 7 * 86400e3) return `${Math.floor(diff / 86400e3)} 天前`;
+  return new Date(ts).toLocaleDateString('zh-CN');
+}
+
+async function activeTabInfo() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab) return null;
+    return { id: tab.id, url: tab.url || '', title: tab.title || '' };
+  } catch {
+    return null;
+  }
+}
+
+function firstUserText(messages) {
+  for (const m of messages || []) {
+    if (m.role !== 'user') continue;
+    if (typeof m.content === 'string') {
+      if (m.content.trim()) return m.content;
+      continue;
+    }
+    const t = (m.content || [])
+      .filter((b) => b?.type === 'text' && b.text)
+      .map((b) => b.text)
+      .join(' ');
+    if (t.trim()) return t;
+  }
+  return '';
+}
+
+/** 把恢复出来的消息重绘成气泡（工具调用细节不展开，只留一行说明）。 */
+function renderHistory(messages) {
+  for (const m of messages || []) {
+    const blocks =
+      typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content || [];
+    const text = blocks
+      .filter((b) => b?.type === 'text' && b.text)
+      .map((b) => b.text)
+      .join('');
+    if (m.role === 'user') {
+      if (text.trim()) renderMessage('user', text);
+      continue;
+    }
+    if (m.role !== 'assistant') continue;
+    if (text.trim()) renderMessage('assistant', text);
+    const toolCount = blocks.filter((b) => b?.type === 'tool_use').length;
+    if (toolCount) {
+      const note = document.createElement('div');
+      note.className = 'msg-note';
+      note.textContent = `（本轮调用了 ${toolCount} 个工具，详情未保存）`;
+      el.messages.appendChild(note);
+    }
+  }
+  scrollToBottom();
+}
+
+function updateSessionChrome() {
+  const host = hostOf(state.sessionTab?.url);
+  el.sessions.title = `会话：${state.sessionTitle}${host ? `（${host}）` : ''}`;
+  el.sessionCurrent.textContent = host
+    ? `当前：${state.sessionTitle} · 来源 ${host}`
+    : `当前：${state.sessionTitle}`;
+}
+
+async function renderSessionList() {
+  if (!state.sessionStore || !el.sessionList) return;
+  const items = await state.sessionStore.list();
+  el.sessionList.innerHTML = '';
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 's-empty';
+    empty.textContent = '还没有保存的会话。发送第一条消息后会自动保存。';
+    el.sessionList.appendChild(empty);
+    updateSessionChrome();
+    return;
+  }
+  for (const s of items) {
+    const host = hostOf(s.tab?.url);
+    const row = document.createElement('div');
+    row.className = `s-row${s.id === state.sessionId ? ' active' : ''}`;
+    row.dataset.id = s.id;
+    row.innerHTML =
+      '<div class="s-main">' +
+      '<div class="s-title"></div>' +
+      '<div class="s-meta">' +
+      (host ? `<span class="s-host">${escapeHtml(host)}</span> · ` : '') +
+      `${formatWhen(s.updatedAt)} · ${s.messageCount || 0} 条` +
+      '</div>' +
+      '</div>' +
+      '<button class="icon-btn tiny s-del" title="删除会话">✕</button>';
+    const titleEl = row.querySelector('.s-title');
+    titleEl.textContent = s.title || '未命名会话';
+    titleEl.title = '双击重命名';
+    titleEl.addEventListener('dblclick', async (e) => {
+      e.stopPropagation();
+      const name = prompt('重命名会话', s.title || '');
+      if (!name || !name.trim()) return;
+      await state.sessionStore.renameSession(s.id, name.trim());
+      if (s.id === state.sessionId) {
+        state.sessionTitle = name.trim();
+        updateSessionChrome();
+      }
+      await renderSessionList();
+    });
+    row.querySelector('.s-del').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await deleteSession(s.id);
+    });
+    row.addEventListener('click', async () => {
+      if (state.busy) {
+        toast('对话进行中，稍后再切换会话');
+        return;
+      }
+      if (s.id !== state.sessionId) await switchSession(s.id);
+      el.sessionDrawer.hidden = true;
+    });
+    el.sessionList.appendChild(row);
+  }
+  updateSessionChrome();
+}
+
+async function switchSession(id, { render = true } = {}) {
+  if (!state.sessionStore) return false;
+  const s = await state.sessionStore.load(id);
+  if (!s) return false;
+  state.sessionId = s.id;
+  state.sessionTitle = s.title || '未命名会话';
+  state.sessionCreatedAt = s.createdAt || Date.now();
+  state.chatStartedAt = new Date(state.sessionCreatedAt).toISOString();
+  state.sessionTab = s.tab || null;
+  state.messages = Array.isArray(s.messages) ? s.messages : [];
+  await state.sessionStore.setCurrent(s.id);
+  if (render) {
+    el.messages.innerHTML = '';
+    el.tray.hidden = true;
+    el.tray.innerHTML = '';
+    renderHistory(state.messages);
+  }
+  updateSessionChrome();
+  await renderSessionList();
+  syncChatHistory();
+  return true;
+}
+
+async function startBlankSession({ withCurrentTab = true } = {}) {
+  state.sessionId = newSessionId();
+  state.sessionTitle = '新会话';
+  state.sessionCreatedAt = Date.now();
+  state.chatStartedAt = new Date(state.sessionCreatedAt).toISOString();
+  state.messages = [];
+  state.sessionTab = null;
+  if (withCurrentTab) {
+    const tab = await activeTabInfo();
+    if (tab) state.sessionTab = { url: tab.url, title: tab.title };
+  }
+  el.messages.innerHTML = '';
+  el.tray.hidden = true;
+  el.tray.innerHTML = '';
+  updateSessionChrome();
+  await renderSessionList();
+  syncChatHistory();
+}
+
+/**
+ * 把当前对话写进本地存储。
+ * 只在有消息时保存 —— 空白会话不占用列表。
+ */
+async function persistCurrentSession() {
+  if (!state.sessionStore || !state.messages.length) return;
+  if (!state.sessionId) state.sessionId = newSessionId();
+  if (!state.sessionTitle || state.sessionTitle === '新会话') {
+    state.sessionTitle = deriveTitle(firstUserText(state.messages));
+  }
+  const tab = await activeTabInfo();
+  if (!state.sessionTab && tab) state.sessionTab = { url: tab.url, title: tab.title };
+  try {
+    await state.sessionStore.saveSession({
+      id: state.sessionId,
+      title: state.sessionTitle,
+      createdAt: state.sessionCreatedAt || Date.now(),
+      tab: state.sessionTab,
+      messages: state.messages,
+    });
+    await state.sessionStore.setCurrent(state.sessionId);
+    if (tab?.id != null) await state.sessionStore.bindTab(tab.id, state.sessionId, tab.url);
+  } catch (err) {
+    console.warn('[nbc panel] 会话保存失败', err);
+    toast('会话保存失败（存储空间可能已满）');
+  }
+  updateSessionChrome();
+  await renderSessionList();
+}
+
+async function deleteSession(id) {
+  if (state.busy) {
+    toast('对话进行中，稍后再删除会话');
+    return;
+  }
+  await state.sessionStore.removeSession(id);
+  if (id === state.sessionId) {
+    const rest = await state.sessionStore.list();
+    if (rest.length) await switchSession(rest[0].id);
+    else await startBlankSession();
+  } else {
+    await renderSessionList();
+  }
+}
+
+async function initSessions() {
+  state.sessionStore = createSessionStore(chrome.storage.local, chrome.storage.session);
+  const prefs = await state.sessionStore.getPrefs();
+  state.followTab = prefs.followTab !== false;
+  el.followTab.checked = state.followTab;
+  try {
+    state.windowId = (await chrome.windows.getCurrent()).id;
+  } catch { /* 拿不到窗口也不影响会话 */ }
+
+  const tab = await activeTabInfo();
+  let target = null;
+  if (state.followTab && tab?.id != null) {
+    target = await state.sessionStore.sessionForTab(tab.id, tab.url);
+  }
+  if (!target) target = await state.sessionStore.getCurrent();
+  if (target && (await switchSession(target))) return;
+  await startBlankSession();
+}
+
+
 async function send() {
   const text = el.input.value.trim();
   if (!text || state.busy) return;
@@ -375,6 +655,10 @@ async function send() {
   const pageCtx = await currentPageContext();
   const history = [...state.messages];
   history.push({ role: 'user', content: [Text(text)] });
+  // 先把用户消息写进 state/本地存储：即使模型请求失败、或用户中途关掉面板，
+  // 这条提问也不会凭空消失。
+  state.messages = history;
+  await persistCurrentSession();
 
   // 事件回调：函数式（agent.js 的约定）
   const events = {
@@ -439,6 +723,7 @@ async function send() {
       beforeTool: el.auto.checked ? null : confirmTool,
     });
     state.messages = result.messages.filter((m) => m.role !== 'system');
+    await persistCurrentSession();
     await saveSettings();
     syncChatHistory();
   } catch (err) {
@@ -465,6 +750,8 @@ async function send() {
     el.send.disabled = false;
     el.input.focus();
     scrollToBottom();
+    // 失败/中断时历史里可能只有用户消息，也同步一份给 chat.export
+    syncChatHistory();
   }
 }
 
@@ -504,14 +791,48 @@ el.input.addEventListener('input', () => {
   el.input.style.height = `${Math.min(el.input.scrollHeight, 160)}px`;
 });
 
-el.clear.addEventListener('click', () => {
+el.clear.addEventListener('click', async () => {
   if (state.busy) return;
-  state.messages = [];
-  state.chatStartedAt = null;
-  el.messages.innerHTML = '';
-  el.tray.hidden = true;
-  el.tray.innerHTML = '';
-  chrome.runtime.sendMessage({ type: 'nbc:chat:sync', messages: [], meta: {} }).catch(() => {});
+  // 不再直接丢弃：旧会话留在「会话」记录里，这里只是开一条新的。
+  await startBlankSession();
+  el.input.focus();
+});
+
+// ---------- 会话抽屉 ----------
+el.sessions.addEventListener('click', async () => {
+  el.settings.hidden = true;
+  await renderSessionList();
+  el.sessionDrawer.hidden = false;
+});
+
+el.closeSessions.addEventListener('click', () => {
+  el.sessionDrawer.hidden = true;
+});
+
+el.newSession.addEventListener('click', async () => {
+  if (state.busy) {
+    toast('对话进行中，稍后再新建会话');
+    return;
+  }
+  await startBlankSession();
+  el.sessionDrawer.hidden = true;
+  el.input.focus();
+});
+
+el.followTab.addEventListener('change', async () => {
+  state.followTab = el.followTab.checked;
+  await state.sessionStore?.setPrefs({ followTab: state.followTab });
+  toast(state.followTab ? '已开启：切换标签页时恢复该页会话' : '已关闭标签页跟随');
+});
+
+// 标签页切换：恢复该标签页上次使用的会话（轻关联，不新建空会话）
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  if (!state.followTab || state.busy || !state.sessionStore) return;
+  if (state.windowId != null && windowId !== state.windowId) return;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const sid = await state.sessionStore.sessionForTab(tabId, tab?.url);
+  if (!sid || sid === state.sessionId) return;
+  if (await switchSession(sid)) toast(`已切换到「${state.sessionTitle}」`);
 });
 
 el.btnSettings.addEventListener('click', openSettings);
@@ -792,11 +1113,18 @@ async function refreshToolStatus() {
 
 $('btn-clear-storage').addEventListener('click', async () => {
   await chrome.storage.local.clear();
+  try {
+    await chrome.storage.session.clear();
+  } catch { /* 旧版本可能没有 storage.session */ }
   state.messages = [];
-  el.messages.innerHTML = '';
+  state.sessionId = null;
+  state.sessionTitle = '新会话';
+  state.sessionCreatedAt = null;
+  state.sessionTab = null;
   await loadSettings();
   syncSettingsForm();
   updateProviderBar();
+  await startBlankSession();
   $('save-status').textContent = '已清除';
 });
 
@@ -1021,13 +1349,18 @@ chrome.commands?.onCommand?.addListener?.(() => el.input.focus());
 
 (async () => {
   await loadSettings();
+  await initSessions();
   fillProviderSelect();
   updateProviderBar();
   el.input.focus();
   checkCurrentSelection();
   refreshQueue();
 
-  if (!state.provider.apiKey && !PRESET_MAP[state.provider.providerId]?.noKey) {
+  if (
+    !state.provider.apiKey &&
+    !PRESET_MAP[state.provider.providerId]?.noKey &&
+    !state.messages.length
+  ) {
     el.messages.innerHTML =
       '<div class="msg assistant"><div class="bubble">' +
       '👋 欢迎使用 NetBrowserClaw。\n\n' +

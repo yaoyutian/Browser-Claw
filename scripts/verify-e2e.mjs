@@ -8,6 +8,7 @@
 // 它会真实地：加载扩展 → 打开测试页 → 调工具 → 检查 DOM/文件系统结果。
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { findTestBrowser, killTree, cleanupStrayTestBrowsers, cleanupStrayTestBrowsersAsync, assertOwnsCdpPort } from './_browser.mjs';
 import {
   mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, readFileSync,
@@ -243,9 +244,29 @@ render();
 </script></body></html>`
 );
 
-const webServer = spawn('python', ['-m', 'http.server', String(WEB_PORT), '--directory', webRoot], {
-  stdio: 'ignore',
-});
+// 夹具服务器。必须显式 --bind 127.0.0.1：
+// python 的 http.server 在 Windows 上会对 0.0.0.0 调 socket.getfqdn()，
+// DNS 慢的时候会卡在启动阶段（不监听、也不报错），浏览器打开就是错误页，
+// 后续所有断言都以「无法注入内容脚本」失败。实测踩过。
+const webServer = spawn(
+  'python',
+  ['-m', 'http.server', String(WEB_PORT), '--bind', '127.0.0.1', '--directory', webRoot],
+  {
+    stdio: 'ignore',
+  }
+);
+
+/** 等夹具服务器真正可用，避免浏览器打开错误页后一路失败。 */
+async function waitForWebServer(tries = 40) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${WEB_PORT}/testpage.html`);
+      if (r.ok) return true;
+    } catch {}
+    await sleep(250);
+  }
+  return false;
+}
 
 // 自己启动一个 companion（默认端口 8787），保证「下载能力」相关测试
 // 不依赖外部状态 —— 之前依赖外部手动启动的 companion，会话结束进程被回收，
@@ -369,6 +390,14 @@ function startAliveCheck() {
 
 async function main() {
   await waitForDevtools();
+  const webOk = await waitForWebServer();
+  if (!webOk) {
+    throw new Error(
+      `夹具服务器没有起来（http://127.0.0.1:${WEB_PORT}/testpage.html 不可用）。` +
+        '常见原因：端口被上一次运行的 python 进程占用。' +
+        '请检查 netstat 后只结束那个 python 进程。'
+    );
+  }
   await sleep(2500);
   startAliveCheck();
 
@@ -461,7 +490,8 @@ async function main() {
   // --- 1. page.read ------------------------------------------------------
   console.log('\n[1] page.read —— 读取网页正文');
   const read = await call('page.read');
-  check('返回成功', read.ok === true, read.error || '');
+  check('返回成功', read.ok === true,
+    read.error ? `${read.error}${read.detail ? '：' + read.detail : ''}` : '');
   check('标题正确', read.data?.title?.includes('测试文章'), read.data?.title);
   check('抽取到正文', (read.data?.markdown?.length || 0) > 200, `${read.data?.markdown?.length} 字符`);
   check('保留了标题层级', JSON.stringify(read.data?.headings || []).includes('Manifest V3'));
@@ -1086,6 +1116,167 @@ async function main() {
   check('按钮可见后重跑不再统计为揭开', (reveal2.data?.revealed?.length || 0) === 0,
     JSON.stringify(reveal2.data?.revealed));
   pdfConn.ws.close();
+
+  // --- 20. 会话持久化 ----------------------------------------------------
+  console.log('\n[20] 会话持久化 —— 重开面板后恢复对话');
+  const seeded = await panel.evaluate(`(async () => {
+    const m = await import(chrome.runtime.getURL('src/shared/sessions.js'));
+    const store = m.createSessionStore(chrome.storage.local, chrome.storage.session);
+    await store.saveSession({
+      id: 'e2e-session',
+      title: '恢复测试会话',
+      createdAt: Date.now() - 60000,
+      tab: { url: 'http://127.0.0.1:${WEB_PORT}/testpage.html', title: '测试文章' },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '请记住暗号是 1234' }] },
+        { role: 'assistant', content: [{ type: 'text', text: '好的，暗号 1234。' }] }
+      ]
+    });
+    await store.setCurrent('e2e-session');
+    return 'ok';
+  })()`);
+  check('写入测试会话', seeded === 'ok', String(seeded));
+
+  const panel2TabId = await sw.evaluate(
+    `chrome.tabs.create({url:'chrome-extension://${extId}/src/sidepanel/panel.html'}).then(t=>t.id)`
+  );
+  await sleep(2000);
+  const sessionList = await httpJson('/json/list');
+  const panel2Target = sessionList.find(
+    (t) => t.url.includes('/src/sidepanel/panel.html') && t.id !== panelTarget.id
+  );
+  check('重开的面板页面已加载', Boolean(panel2Target), panel2Target?.url || '');
+  if (panel2Target) {
+    const panel2 = connect(panel2Target.webSocketDebuggerUrl);
+    await panel2.ready;
+    await panel2.send('Runtime.enable');
+    await waitForChromeApi(panel2);
+    // 等会话恢复完成（模块加载 + storage 读取是异步的）
+    let restored = '';
+    for (let i = 0; i < 20; i++) {
+      restored = await panel2
+        .evaluate(`document.getElementById('messages').textContent`)
+        .catch(() => '');
+      if (restored.includes('暗号是 1234')) break;
+      await sleep(250);
+    }
+    check('恢复出用户消息', restored.includes('暗号是 1234'), String(restored).slice(0, 60));
+    check('恢复出助手消息', restored.includes('暗号 1234。'), '');
+    const listText = await panel2.evaluate(
+      `document.getElementById('session-list').textContent`
+    );
+    check('会话列表显示历史会话', listText.includes('恢复测试会话'), String(listText).slice(0, 60));
+    const currentText = await panel2.evaluate(
+      `document.getElementById('session-current').textContent`
+    );
+    check('会话头显示来源站点', currentText.includes('127.0.0.1'), currentText);
+
+    // 新会话按钮：清空当前界面，但不删除刚才的会话
+    await panel2.evaluate(`document.getElementById('btn-new-session').click()`);
+    await sleep(800);
+    const afterNew = await panel2.evaluate(
+      `document.getElementById('messages').textContent`
+    );
+    check('新会话清空当前对话', afterNew.trim() === '', String(afterNew).slice(0, 40));
+    const listAfter = await panel2.evaluate(
+      `document.getElementById('session-list').textContent`
+    );
+    check('旧会话仍留在列表里', listAfter.includes('恢复测试会话'), '');
+    panel2.ws.close();
+  }
+  await sw.evaluate(`chrome.tabs.remove(${panel2TabId})`).catch(() => {});
+
+  // --- 21. 会话保存（真实发送链路） -------------------------------------
+  console.log('\n[21] 会话保存 —— 发送消息后写入本地存储');
+  const MODEL_PORT = 8906;
+  const fakeModel = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      });
+      res.write(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: '已记住 5678' }, index: 0 }] })}\n\n`
+      );
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((r) => fakeModel.listen(MODEL_PORT, '127.0.0.1', r));
+
+  await panel.evaluate(
+    `chrome.storage.local.set({'nbc:settings': ${JSON.stringify({
+      providerId: '__custom__',
+      kind: 'openai',
+      label: '测试模型',
+      baseUrl: `http://127.0.0.1:${MODEL_PORT}/v1`,
+      apiKey: 'test-key',
+      model: 'fake-model',
+      transport: 'direct',
+      maxTokens: 512,
+      thinking: 'off',
+    })}})`
+  );
+
+  const panel3TabId = await sw.evaluate(
+    `chrome.tabs.create({url:'chrome-extension://${extId}/src/sidepanel/panel.html'}).then(t=>t.id)`
+  );
+  await sleep(2000);
+  const list4 = await httpJson('/json/list');
+  const panel3Target = list4.find(
+    (t) => t.url.includes('/src/sidepanel/panel.html') && t.id !== panelTarget.id && t.id !== panel2Target?.id
+  );
+  check('发送测试用面板已加载', Boolean(panel3Target), panel3Target?.url || '');
+  if (panel3Target) {
+    const panel3 = connect(panel3Target.webSocketDebuggerUrl);
+    await panel3.ready;
+    await panel3.send('Runtime.enable');
+    await waitForChromeApi(panel3);
+    await sleep(1000);
+    // 开一条新会话再发送，验证「标题来自首条消息」
+    await panel3.evaluate(`document.getElementById('btn-new-session').click()`);
+    await sleep(400);
+    await panel3.evaluate(
+      `(() => {
+        const i = document.getElementById('input');
+        i.value = '记住暗号 5678';
+        i.dispatchEvent(new Event('input'));
+        document.getElementById('btn-send').click();
+        return 'sent';
+      })()`
+    );
+
+    let reply = '';
+    for (let i = 0; i < 30; i++) {
+      reply = await panel3
+        .evaluate(`document.getElementById('messages').textContent`)
+        .catch(() => '');
+      if (reply.includes('已记住 5678')) break;
+      await sleep(300);
+    }
+    check('模型回复已渲染', reply.includes('已记住 5678'), String(reply).slice(-60));
+
+    const savedRaw = await panel3.evaluate(
+      `chrome.storage.local.get(['nbc:sessions','nbc:sessions:current']).then(x=>JSON.stringify(x))`
+    );
+    const saved = JSON.parse(savedRaw || '{}');
+    const currentId = saved['nbc:sessions:current'];
+    const meta = (saved['nbc:sessions'] || []).find((m) => m.id === currentId);
+    check('会话已写入索引', Boolean(meta), JSON.stringify((saved['nbc:sessions'] || []).map((m) => m.id)));
+    check('标题来自首条消息', String(meta?.title || '').includes('记住暗号'), String(meta?.title || ''));
+    check('索引记录消息条数', (meta?.messageCount || 0) >= 2, String(meta?.messageCount));
+
+    const fullRaw = await panel3.evaluate(
+      `chrome.storage.local.get('nbc:session:' + ${JSON.stringify(currentId)}).then(x=>JSON.stringify(x))`
+    );
+    check('正文含用户与助手消息',
+      fullRaw.includes('记住暗号 5678') && fullRaw.includes('已记住 5678'), '');
+    panel3.ws.close();
+  }
+  await sw.evaluate(`chrome.tabs.remove(${panel3TabId})`).catch(() => {});
+  await new Promise((r) => fakeModel.close(r));
 
   console.log('\n面板控制台日志：');
   console.log(panel.logs.slice(-15).join('\n') || '（无）');

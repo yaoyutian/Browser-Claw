@@ -64,6 +64,7 @@
 | 🗄️ **整页归档** | `page.archive` | 打包成自包含的单文件 HTML（CSS/图片全内联），离线双击即开 |
 | 📥 **下载队列** | `download.queue` | 大批量下载入队后台跑，侧边栏实时看进度，可暂停/取消 |
 | 💬 **导出对话** | `chat.export` | 整段对话（含工具调用记录）存成 Markdown |
+| 🗂️ **会话管理** | 顶栏 ▤ | 对话存本机，关面板/重启浏览器后自动恢复；可切换、重命名、删除，并可按标签页轻关联 |
 | 🗂️ **标签页管理** | `tab.*` `nav.back` | 列出、打开、切换、关闭标签页 |
 | 🔌 **对外提供能力** | MCP server | 让 Claude Code / Cursor / 任何 MCP 客户端驱动你的**真实浏览器** |
 
@@ -292,7 +293,7 @@ DeepSeek 默认开启**思考模式**，会先输出一段思维链再回答 —
 - `本地中继` —— 请求先到本地 companion 再转发。解决官方接口拒绝浏览器直连的情况
 
 > **隐私**：API Key 只存在 `chrome.storage.local`，不上传任何服务器，不参与浏览器账号同步。
-> 对话记录只在内存中，关闭面板即清空。代码里没有任何遥测。
+> 对话记录同样保存在本机（可随时在「会话」里删除或一键清除），代码里没有任何遥测。
 
 ---
 
@@ -303,7 +304,7 @@ extension/          扩展本体（原生 ES Module，无需构建）
   src/background/   service-worker.js · handlers.js · bridge.js
   src/content/      media.js · extractor.js · style-agent.js · content.js
   src/sidepanel/    panel.html/.css/.js
-  src/shared/       providers.js · agent.js · tools.js · docx.js · util.js
+  src/shared/       providers.js · agent.js · tools.js · sessions.js · docx.js · util.js
 companion/          server.mjs —— 反向代理 + 桥接 + MCP stdio server
 scripts/            图标生成 + 自动化验证
 docs/               可行性评估 · 架构设计 · 开源借鉴 · 路线图

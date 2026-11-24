@@ -13,9 +13,10 @@
       <span class="name">NetBrowserClaw</span>
     </div>
     <div class="topbar-actions">
+      <button id="btn-sessions" class="icon-btn" title="会话记录">▤</button>
       <button id="btn-export-chat" class="icon-btn" title="导出对话为 Markdown">⇩</button>
       <button id="btn-context" class="icon-btn" title="插入当前页面上下文">⟨页⟩</button>
-      <button id="btn-clear" class="icon-btn" title="清空对话">✕</button>
+      <button id="btn-clear" class="icon-btn" title="新建会话（当前会话会保留在记录里）">＋</button>
       <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
     </div>
   </header>
@@ -66,6 +67,28 @@
       <span id="toast-hint" class="hint"></span>
     </div>
   </footer>
+
+  <!-- 会话抽屉 -->
+  <aside id="session-drawer" class="settings session-drawer" hidden>
+    <div class="settings-head">
+      <h2>会话</h2>
+      <button id="btn-close-sessions" class="icon-btn">✕</button>
+    </div>
+    <div class="settings-body">
+      <div class="row s-actions">
+        <button id="btn-new-session" class="primary-btn">＋ 新会话</button>
+        <label class="checkbox" title="切换标签页时，恢复该标签页上次使用的会话">
+          <input type="checkbox" id="chk-follow-tab" checked /> 跟随标签页
+        </label>
+      </div>
+      <p class="hint" id="session-current"></p>
+      <div id="session-list" class="session-list"></div>
+      <p class="hint">
+        会话保存在本机浏览器（不加密、不上传）。关闭面板或重启浏览器后仍可恢复。
+        为控制体积，截图与超长工具输出在保存时会被裁剪。
+      </p>
+    </div>
+  </aside>
 
   <!-- 设置抽屉 -->
   <aside id="settings" class="settings" hidden>
@@ -196,7 +219,7 @@
         <h3>数据与隐私</h3>
         <p class="hint">
           本扩展不设服务器、不做遥测。API Key 保存在 Chrome 本地存储；
-          对话记录只存在内存中，关闭面板即清空。
+          对话记录同样保存在本机，可在「会话」里逐条删除。
         </p>
         <button id="btn-clear-storage" class="mini-btn">清除全部本地数据</button>
       </section>
